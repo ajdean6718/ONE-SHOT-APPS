@@ -170,8 +170,12 @@ def test_text_needs_outlines_first(seam):
     t = bpy.context.active_object
     a = add_rect(scene, "A", 0, 0, 100, 100)
     select(a, t)
+    before = sorted(o.name for o in bpy.data.objects)
     with pytest.raises(RuntimeError, match="poll"):
         bpy.ops.seam.pathfinder(op="UNION")
+    assert sorted(o.name for o in bpy.data.objects) == before          # nothing created, nothing deleted
+    assert {o.name for o in bpy.context.selected_objects} == {a.name, t.name}
+    assert t.type == "FONT" and not t.hide_get() and len(t.data.body) == 1
 
 
 def test_compound_make_and_release(seam):
@@ -196,3 +200,77 @@ def test_compound_make_and_release(seam):
     with pytest.raises(RuntimeError, match="poll"):
         select(parts[0])
         bpy.ops.seam.compound_release()
+
+
+# ------------------------------------------------------------------ review fixes: clipped inputs, orphaned text
+
+def _clipped_pair(scene):
+    a = add_rect(scene, "A", 0, 0, 100, 100)
+    b = add_rect(scene, "B", 80, 80, 180, 180)
+    m = add_rect(scene, "M", 0, 0, 50, 50)
+    select(a, m)
+    bpy.ops.seam.clip_make()                      # top-most selected (M) clips A
+    assert a.seam.clip_source is m
+    return a, b, m
+
+
+@pytest.mark.parametrize("opname", ["pathfinder", "compound_make"])
+def test_clipped_input_is_refused_not_silently_unclipped(two_squares, opname):
+    scene = bpy.context.scene
+    a, b, m = _clipped_pair(scene)
+    select(a, b)
+    before = sorted(o.name for o in bpy.data.objects)
+    with pytest.raises(RuntimeError, match="release the clip first"):
+        getattr(bpy.ops.seam, opname)()
+    assert sorted(o.name for o in bpy.data.objects) == before
+    assert a.seam.clip_source is m
+    # after releasing it works
+    select(a)
+    bpy.ops.seam.clip_release()
+    select(a, b)
+    assert getattr(bpy.ops.seam, opname)() == {"FINISHED"}
+
+
+def test_pathfinder_on_live_outline_deletes_the_orphaned_text(seam):
+    require("geometry.flatten_path", "boolean2d.boolean", "boolean2d.union_all")
+    scene = bpy.context.scene
+    bpy.ops.seam.add_text(body="T", x=0, y=0, size=60)
+    bpy.ops.seam.text_to_outline()
+    outline = bpy.context.active_object
+    r = add_rect(scene, "R", 0, 0, 30, 30)
+    select(outline, r)
+    assert bpy.ops.seam.pathfinder(op="UNION") == {"FINISHED"}
+    assert not [o for o in bpy.data.objects if o.type == "FONT"]                 # no hidden orphan
+    assert len(shapes()) == 1
+
+
+def test_second_follower_keeps_the_text_alive(seam):
+    """Only the last outline following a text takes the hidden text with it."""
+    require("geometry.flatten_path", "boolean2d.boolean", "boolean2d.union_all")
+    scene = bpy.context.scene
+    bpy.ops.seam.add_text(body="T", x=0, y=0, size=60)
+    text = bpy.context.active_object
+    bpy.ops.seam.text_to_outline()
+    outline = bpy.context.active_object
+    twin = add_rect(scene, "Twin", 200, 0, 230, 30)
+    twin.seam.owner_id = text.seam.id               # a second shape following the same text (only reachable by script)
+    r = add_rect(scene, "R", 0, 0, 30, 30)
+    select(outline, r)
+    assert bpy.ops.seam.pathfinder(op="UNION") == {"FINISHED"}
+    assert text.name in bpy.data.objects and text.hide_get()
+
+
+def test_compound_release_keeps_the_clip(two_squares):
+    scene = bpy.context.scene
+    a, b = two_squares
+    m = add_rect(scene, "M", 0, 0, 60, 60)
+    select(a, b)
+    bpy.ops.seam.compound_make()
+    comp = bpy.context.active_object
+    select(comp, m)
+    bpy.ops.seam.clip_make()
+    assert comp.seam.clip_source is m
+    select(comp)
+    assert bpy.ops.seam.compound_release() == {"FINISHED"}
+    pieces = [o for o in shapes() if o is not m]
+    assert len(pieces) == 2 and all(o.seam.clip_source is m for o in pieces)

@@ -363,7 +363,7 @@ class SEAM_OT_outline_revert(bpy.types.Operator):
             text = outline_owner(scene, o)
             if text is None:
                 continue
-            delete_artwork(o)
+            delete_artwork(o, drop_orphan_text=False)
             text.hide_set(False)
             last = text
         if last is not None:

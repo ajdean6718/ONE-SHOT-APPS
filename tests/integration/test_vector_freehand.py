@@ -88,16 +88,37 @@ def test_closing_when_end_near_start(seam):
 
 
 def test_smoothing_reduces_jitter(seam):
+    """The fitted curve follows the underlying sine more closely with more smoothing (kernel independent)."""
     require("fitting.smooth_polyline", "fitting.fit_bezier", "geometry.flatten_path")
     import random
     rnd = random.Random(3)
     base = sine_points(n=80)
     noisy = [(x, y + rnd.uniform(-3.0, 3.0)) for x, y in base]
-    draw(noisy, smoothing=0.0, error=0.3)
-    raw = bpy.context.active_object
-    draw(noisy, smoothing=1.0, error=0.3)
-    smooth = bpy.context.active_object
-    assert len(smooth.data.splines[0].bezier_points) <= len(raw.data.splines[0].bezier_points)
+    devs = {}
+    for amount in (0.0, 0.5, 1.0):
+        assert draw(noisy, smoothing=amount, error=0.3) == {"FINISHED"}
+        devs[amount] = _mean_deviation(bpy.context.active_object, base[2:-2])
+    assert devs[0.5] < devs[0.0]
+    assert devs[1.0] < devs[0.0]
+    assert devs[1.0] < 0.7 * devs[0.0]
+    from seam_studio.vector import freehand
+    assert [freehand.smoothing_iterations(v) for v in (0.0, 0.5, 1.0, 5.0)] == [0, 4, 8, 8]
+
+
+def _mean_deviation(obj, pts):
+    from seam_studio.seam_core import geometry
+    from seam_studio.vector.export_png import canvas_paths
+    poly = geometry.flatten_path(canvas_paths(obj)[0], 32)
+
+    def dist(p):
+        best = 1e18
+        for a, b in zip(poly, poly[1:]):
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            L2 = dx * dx + dy * dy or 1e-12
+            t = max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2))
+            best = min(best, math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy))
+        return best
+    return sum(dist(p) for p in pts) / len(pts)
 
 
 def test_errors(seam):
@@ -118,3 +139,21 @@ def test_tool_and_description(seam):
     assert tool.bl_keymap[0][0] == "seam.draw_freehand"
     assert hasattr(bpy.ops.seam, "draw_freehand")
     assert "pressure" in bpy.types.SEAM_OT_draw_freehand.__doc__.lower()
+
+
+def test_pencil_keymap_item_is_registered(seam):
+    """The tool's press trigger is in the add-on / user key configs (an actual press cannot be simulated headless)."""
+    wm = bpy.context.window_manager
+    found = []
+    for kc in (wm.keyconfigs.addon, wm.keyconfigs.user):
+        if kc is None:
+            continue
+        for km in kc.keymaps:
+            if "Pencil" not in km.name:
+                continue
+            for kmi in km.keymap_items:
+                if kmi.idname == "seam.draw_freehand" and kmi.type == "LEFTMOUSE" and kmi.value == "PRESS":
+                    found.append(km.name)
+    if not found and bpy.app.background:
+        pytest.skip("tool keymaps are not instantiated in background mode on this runtime")
+    assert found, "seam.tool_pencil has no seam.draw_freehand LEFTMOUSE PRESS keymap item"

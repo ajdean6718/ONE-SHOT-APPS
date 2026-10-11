@@ -30,7 +30,9 @@ Conventions
 * Clip masks (objects referenced by another object's ``seam.clip_source``) are never drawn
   themselves; the clipped objects get ``clip=`` rings (see ``clip.py``).
 * Raster objects need ``paint.rasterdoc.composite_array(doc)``; when it is missing the raster is
-  skipped and a warning is appended to ``warnings``.
+  skipped and a warning is appended to ``warnings``.  The composite is stretched over the bounds of the
+  raster plane (the plane owns the extent, exactly as the viewport material maps the UVs onto it; paint
+  creates the plane with the aspect ratio of the document).
 """
 
 from __future__ import annotations
@@ -311,28 +313,58 @@ def stroke_rings(paths, style, resolution: int = EXPORT_RESOLUTION):
     return rings
 
 
+def _fill_minus_stroke(fill, fill_rule: str, stroke_rings_):
+    """Fill rings with the stroked area removed (even-odd ring set), or None when that cannot be computed."""
+    from ..seam_core import boolean2d
+    try:
+        shapes = boolean2d.boolean(resolve_rings(fill, fill_rule), resolve_rings(stroke_rings_, "NONZERO"),
+                                   "DIFFERENCE", "EVENODD")
+    except (boolean2d.BooleanUnavailable, ValueError):
+        return None
+    out = []
+    for outer, holes in shapes:
+        out.append(list(outer))
+        out.extend(list(h) for h in holes)
+    return out
+
+
 def object_items(obj, resolution: int = EXPORT_RESOLUTION, warnings=None) -> list:
-    """Render items (fill, then stroke) for one SHAPE or TEXT object."""
+    """Render items (fill, then stroke) for one SHAPE or TEXT object.
+
+    Object opacity is *group* opacity, like the SVG ``opacity`` attribute: where stroke and fill overlap
+    the stroke simply replaces the fill, it is not blended on top of it.  For ``opacity < 1`` the stroked
+    area is therefore cut out of the fill.  (The fill and stroke then share an anti-aliased edge, which
+    is a few percent lighter than the group result on that one pixel line.)
+    """
     style = obj.seam.style
     paths = canvas_paths(obj)
     if not paths:
         return []
     clip = clip_rings_for(obj, resolution)
     opacity = float(style.opacity)
-    items = []
+    fill_items = []
+    stroke_item = None
+    fill_rings_ = []
+    fill_rule = "NONZERO" if obj.type == "FONT" else style.fill_rule
     if style.fill_enabled:
-        rings = fill_rings(paths, resolution)
-        bounds = rings_bounds(rings)
-        if rings and bounds is not None:
-            rule = "NONZERO" if obj.type == "FONT" else style.fill_rule
-            items.append(render2d.FillItem(rings=rings, paint=fill_paint(style, bounds), fill_rule=rule,
-                                           opacity=opacity, clip=clip))
+        fill_rings_ = fill_rings(paths, resolution)
+        bounds = rings_bounds(fill_rings_)
+        if fill_rings_ and bounds is not None:
+            fill_items.append(render2d.FillItem(rings=fill_rings_, paint=fill_paint(style, bounds),
+                                                fill_rule=fill_rule, opacity=opacity, clip=clip))
     if style.stroke_enabled and style.stroke_width > 0.0:
         rings = stroke_rings(paths, style, resolution)
         if rings:
-            items.append(render2d.FillItem(rings=rings, paint=render2d.SolidPaint(rgba(style.stroke_color)),
-                                           fill_rule="NONZERO", opacity=opacity, clip=clip))
-    return items
+            stroke_item = render2d.FillItem(rings=rings, paint=render2d.SolidPaint(rgba(style.stroke_color)),
+                                            fill_rule="NONZERO", opacity=opacity, clip=clip)
+    if fill_items and stroke_item is not None and opacity < 1.0 - 1e-6:
+        cut = _fill_minus_stroke(fill_rings_, fill_rule, stroke_item.rings)
+        if cut is not None:
+            fill_items[0].rings = cut
+            fill_items[0].fill_rule = "EVENODD"
+            if not cut:
+                fill_items = []
+    return fill_items + ([stroke_item] if stroke_item is not None else [])
 
 
 def raster_image_array(scene, obj):

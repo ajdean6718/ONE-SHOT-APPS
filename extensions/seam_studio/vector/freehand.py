@@ -26,6 +26,15 @@ from .pathfinder import paths_center, select_only, translate_paths
 
 Point = Tuple[float, float]
 MIN_SCREEN_STEP = 2.0     # px between recorded mouse samples
+# The Smoothing slider (0..1) selects the number of smoothing passes. Every pass moves a point halfway to
+# the midpoint of its neighbours (a [1/4, 1/2, 1/4] low-pass). Strengths above 0.5 over-correct and would
+# make alternating jitter *larger*, so the strength is fixed at 0.5 and only the pass count scales.
+SMOOTH_STRENGTH = 0.5
+MAX_SMOOTH_PASSES = 8
+
+
+def smoothing_iterations(smoothing: float) -> int:
+    return int(round(max(0.0, min(1.0, smoothing)) * MAX_SMOOTH_PASSES))
 
 
 # ------------------------------------------------------------------ pure helpers
@@ -73,8 +82,9 @@ def fit_stroke(points: Sequence[Point], smoothing: float, max_error: float, clos
     closed = should_close(pts, close_distance)
     if closed:
         pts = pts[:-1]
-    if smoothing > 0.0 and len(pts) >= 3:
-        pts = fitting.smooth_polyline(pts, smoothing, 2, closed)
+    iterations = smoothing_iterations(smoothing)
+    if iterations > 0 and len(pts) >= 3:
+        pts = fitting.smooth_polyline(pts, SMOOTH_STRENGTH, iterations, closed)
     path = fitting.fit_bezier(pts, max_error, closed)
     return path, closed
 

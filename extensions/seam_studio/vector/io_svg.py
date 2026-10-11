@@ -5,7 +5,15 @@ Export (``seam.svg_export``)
     ``svg.SvgImage`` items in canvas coordinates; ``seam_core.svg.export_svg`` writes the file.
     Bezier data is exported exactly (not flattened), transforms are baked into the paths, text is
     exported as outlines (``text_mode='OUTLINES'``, default) or as ``<text>`` (``'TEXT'``).  Clips
-    become ``<clipPath>`` via ``SvgShape.clip_paths``.  The artboard background rectangle is only added with ``include_background``.
+    become ``<clipPath>`` via ``SvgShape.clip_paths`` (``svg.export_svg`` always writes
+    ``clip-rule="evenodd"``, so a NONZERO mask with overlapping sub-paths is resolved to even-odd polygons first).
+    ``svg.SvgImage`` has no clip field: a clipped RASTER object is clipped in pixel space instead (the PNG that
+    is embedded is cut out by the mask, anti-aliased, at the raster's own resolution).
+    ``text_mode='TEXT'`` writes ``<text>`` only for plain single-line, left-aligned, baseline-anchored text
+    without underline / small caps / text box / rotation; everything else is exported as outlines and
+    reported as a warning.  ``svg.SvgShape`` has no origin field, so the exporter derives ``x``/``y`` from the bbox
+    of ``paths``: for ``<text>`` the paths are replaced by one point at the text origin (left baseline).
+    The artboard background rectangle is only added with ``include_background``.
 Import (``seam.svg_import``)
     Creates shapes with their styles in the active layer.  The artboard comes from the SVG
     viewBox/size (the pristine default artboard is resized, otherwise a new artboard is added to
@@ -24,13 +32,13 @@ from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from .. import ids
 from ..bridge import paths_signature
-from ..seam_core import png, raster as raster_core, svg
+from ..seam_core import png, raster as raster_core, render2d, svg
 from ..seam_core.geometry import BezierPath, BezierPoint
 from . import canvas
 from .clip import apply_clip
-from .export_png import (EXPORT_RESOLUTION, artboard_rect, artwork_in_order, canvas_paths, fill_rings,
-                         gradient_geometry, gradient_stops, raster_bounds, raster_image_array, resolve_artboard,
-                         rgba, rings_bounds)
+from .export_png import (EXPORT_RESOLUTION, artboard_rect, artwork_in_order, canvas_paths, clip_rings_for,
+                         fill_rings, gradient_geometry, gradient_stops, live_canvas_matrix, raster_bounds,
+                         raster_image_array, resolve_artboard, resolve_rings, rgba, rings_bounds)
 from .pathfinder import paths_center, select_only, translate_paths
 
 TEXT_MODES = [
@@ -65,6 +73,64 @@ def _rect_path(x0: float, y0: float, x1: float, y1: float) -> BezierPath:
     return BezierPath([BezierPoint(p, p, p, "VECTOR", "VECTOR") for p in pts], True)
 
 
+def _polygon_paths(rings) -> List[BezierPath]:
+    out = []
+    for ring in rings:
+        pts = [BezierPoint(tuple(p), tuple(p), tuple(p), "VECTOR", "VECTOR") for p in ring]
+        out.append(BezierPath(pts, True))
+    return out
+
+
+def svg_clip_paths(mask) -> List[BezierPath]:
+    """Clip paths for ``mask`` that ``clip-rule="evenodd"`` renders like the PNG exporter does.
+
+    A NONZERO mask with several sub-paths is resolved (union) into even-odd polygons; single sub-path masks
+    and EVENODD masks keep their exact Bezier outlines.
+    """
+    paths = canvas_paths(mask)
+    if mask.seam.style.fill_rule == "NONZERO" and len([p for p in paths if len(p.points) >= 3]) > 1:
+        rings = resolve_rings(fill_rings(paths, EXPORT_RESOLUTION), "NONZERO")
+        return _polygon_paths(rings)
+    return paths
+
+
+def clipped_raster_png(arr, bounds, clip_rings) -> bytes:
+    """PNG bytes of the raster ``arr`` cut out by ``clip_rings`` (canvas coords, even-odd), at its own resolution."""
+    h, w = int(arr.shape[0]), int(arr.shape[1])
+    x0, y0, x1, y1 = bounds
+    item = render2d.ImageItem(rgba=arr, x=x0, y_top=y1, width=x1 - x0, height=y1 - y0, opacity=1.0, clip=clip_rings)
+    img = render2d.render([item], w, h, (x0, y1, x1, y0), supersample=2, background=None)
+    return png.encode_png(raster_core.to_uint8_srgb(img))
+
+
+def _text_font_family(obj) -> str:
+    font = obj.data.font
+    path = getattr(font, "filepath", "") if font is not None else ""
+    if not path or path.startswith("<"):
+        return "sans-serif"                 # built-in font: no installable family name
+    stem = os.path.splitext(os.path.basename(bpy.path.abspath(path)))[0]
+    return f"{stem}, sans-serif" if stem else "sans-serif"
+
+
+def live_text_origin(obj):
+    """(x, y, size) of a text object that can be written as one SVG ``<text>``; ``(None, reason)`` otherwise."""
+    cu = obj.data
+    if "\n" in cu.body or "\r" in cu.body:
+        return None, "multi-line text"
+    if cu.align_x != "LEFT" or cu.align_y != "TOP_BASELINE":
+        return None, "text alignment other than left / baseline"
+    if any(ch.use_underline or ch.use_small_caps for ch in cu.body_format):
+        return None, "underline or small caps"
+    if len(cu.text_boxes) and (cu.text_boxes[0].width > 0.0 or cu.text_boxes[0].height > 0.0):
+        return None, "text box"
+    m = live_canvas_matrix(obj)
+    sx = math.hypot(m[0][0], m[1][0])
+    sy = math.hypot(m[0][1], m[1][1])
+    if abs(m[0][1]) > 1e-6 or abs(m[1][0]) > 1e-6 or abs(sx - sy) > 1e-6 * max(1.0, sx) or m[0][0] < 0 or m[1][1] < 0:
+        return None, "rotation, mirroring or non-uniform scale"
+    return (float(m[0][3]), float(m[1][3]), float(cu.size) * sx), ""
+
+
 def build_export_items(scene, artboard, text_mode: str = "OUTLINES", warnings: Optional[List[str]] = None,
                        include_background: bool = False):
     """Return (items, (x_left, y_top, width, height)) for ``svg.export_svg``."""
@@ -85,7 +151,11 @@ def build_export_items(scene, artboard, text_mode: str = "OUTLINES", warnings: O
             b = raster_bounds(obj)
             if arr is None or b is None:
                 continue
-            data = png.encode_png(raster_core.to_uint8_srgb(arr))
+            clip = clip_rings_for(obj)
+            if clip is not None:
+                data = clipped_raster_png(arr, b, clip)
+            else:
+                data = png.encode_png(raster_core.to_uint8_srgb(arr))
             items.append(svg.SvgImage(name=obj.name, png_bytes=data, x=b[0], y_top=b[3], width=b[2] - b[0],
                                       height=b[3] - b[1], opacity=float(obj.seam.style.opacity)))
             continue
@@ -99,12 +169,18 @@ def build_export_items(scene, artboard, text_mode: str = "OUTLINES", warnings: O
         shape = svg.SvgShape(name=obj.name, paths=paths, style=style)
         mask = obj.seam.clip_source
         if mask is not None and mask is not obj:
-            shape.clip_paths = canvas_paths(mask)
-        if obj.type == "FONT":
-            shape.font_family = obj.data.font.name if obj.data.font else "sans-serif"
-            shape.font_size = float(obj.data.size)
-            if text_mode == "TEXT":
+            shape.clip_paths = svg_clip_paths(mask)
+        if obj.type == "FONT" and text_mode == "TEXT":
+            origin, why = live_text_origin(obj)
+            if origin is None:
+                if warnings is not None:
+                    warnings.append(f"Text '{obj.name}' exported as outlines: {why} cannot be written as <text>")
+            else:
                 shape.text = obj.data.body
+                shape.font_family = _text_font_family(obj)
+                shape.font_size = origin[2]
+                shape.paths = [BezierPath([BezierPoint((origin[0], origin[1]), (origin[0], origin[1]),
+                                                       (origin[0], origin[1]), "VECTOR", "VECTOR")], False)]
         items.append(shape)
     return items, (ax, ay, aw, ah)
 
@@ -217,12 +293,25 @@ def _apply_svg_style(obj, sty: svg.SvgStyle, paths, warnings: List[str]) -> None
     st.fill_rule = sty.fill_rule if sty.fill_rule in ("EVENODD", "NONZERO") else "NONZERO"
 
 
+FACTORY_ARTBOARD = ("Artboard 1", 1920.0, 1080.0)       # what canvas.ensure_canvas creates
+
+
+def _is_factory_artboard(ab) -> bool:
+    ap = ab.seam.artboard
+    fname, fw, fh = FACTORY_ARTBOARD
+    return ab.name == fname and abs(ap.width - fw) < 1e-6 and abs(ap.height - fh) < 1e-6
+
+
 def _prepare_artboard(scene, name: str, width: float, height: float):
-    """Resize the pristine default artboard or add a new one; returns (artboard, x, y) of its top-left corner."""
+    """Resize the pristine default artboard or add a new one; returns (artboard, x, y) of its top-left corner.
+
+    "Pristine" = the only artboard, no artwork, still the factory name and size; a customised artboard is
+    never overwritten (the SVG gets a new artboard to the right instead).
+    """
     canvas.ensure_canvas(scene)
     abs_ = canvas.artboards(scene)
     has_art = bool(canvas.artwork_objects(scene))
-    if len(abs_) == 1 and not has_art:
+    if len(abs_) == 1 and not has_art and _is_factory_artboard(abs_[0]):
         ab = abs_[0]
         ab.name = name
         ab.seam.artboard.width = width

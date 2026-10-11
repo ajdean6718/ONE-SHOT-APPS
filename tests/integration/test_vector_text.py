@@ -78,9 +78,15 @@ def test_style_buttons_whole_body(seam):
 
 def test_underline_changes_outline_geometry(seam):
     ob = add_text("Under")
-    plain = len(_glyph_paths(ob))
+    plain_paths = _glyph_paths(ob)
+    plain = len(plain_paths)
+    low = min(p.co[1] for path in plain_paths for p in path.points)
     bpy.ops.seam.text_style(style="UNDERLINE", state="ON")
-    assert len(_glyph_paths(ob)) > plain          # the underline bar is extra geometry
+    under_paths = _glyph_paths(ob)
+    assert len(under_paths) > plain                # the underline bar is extra geometry ...
+    assert min(p.co[1] for path in under_paths for p in path.points) < low + 1e-6      # ... below the baseline
+    bpy.ops.seam.text_style(style="UNDERLINE", state="OFF")
+    assert len(_glyph_paths(ob)) == plain          # and goes away again
 
 
 def _glyph_paths(ob):

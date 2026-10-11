@@ -146,12 +146,15 @@ def test_clip_errors(seam):
     bpy.ops.seam.add_text(body="T", x=0, y=0, size=30)
     t = bpy.context.active_object                               # text is created last -> top-most
     select(a, t)
+    count = len(bpy.data.objects)
     with pytest.raises(RuntimeError, match="not a vector shape"):
         bpy.ops.seam.clip_make()
-    assert a.seam.clip_source is None
+    assert a.seam.clip_source is None and t.seam.clip_source is None
+    assert len(bpy.data.objects) == count and not t.hide_get()
     select(a)
     with pytest.raises(RuntimeError, match="poll"):
         bpy.ops.seam.clip_make()
+    assert a.seam.clip_source is None and len(bpy.data.objects) == count
 
 
 def test_text_can_be_clipped(seam, engine):

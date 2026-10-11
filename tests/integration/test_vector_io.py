@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from helpers import save_and_reload
-from test_vector_b_common import add_ellipse, add_rect, pixel, require, select, spline_area, srgb8
+from test_vector_b_common import add_ellipse, add_rect, pixel, poly_path, require, select, spline_area, srgb8
 
 PNG_KERNELS = ("geometry.flatten_path", "render2d.render", "raster.to_uint8_srgb", "png.encode_png",
                "png.decode_png")
@@ -367,23 +367,30 @@ def test_raster_objects_become_image_items(seam, tmp_path, monkeypatch):
     ab = setup_artboard(200.0, 100.0)
     scene = bpy.context.scene
     add_raster_plane(scene, 100.0, -50.0, 100.0)          # covers x 50..150, y -100..0
+    # without a compositor the raster is skipped with a warning (explicitly removed, whatever paint provides)
+    monkeypatch.delattr(rasterdoc, "composite_array", raising=False)
     warnings = []
     items = export_png.collect_render_items(scene, ab, warnings)
-    assert items == [] and warnings and "Raster" in warnings[0]          # no compositor yet -> skipped with a warning
-    px = np.zeros((2, 2, 4), np.float32)
-    px[0, 0] = (0, 1, 0, 1)
-    px[0, 1] = (1, 0, 0, 1)
-    px[1, 0] = (0, 0, 1, 1)
-    px[1, 1] = (1, 1, 1, 1)
+    assert items == [] and warnings and "Raster" in warnings[0]
+    # 20 x 20 image of four constant quadrants: sampled at quadrant centres the resampling kernel does not matter
+    px = np.zeros((20, 20, 4), np.float32)
+    px[:10, :10] = (0, 1, 0, 1)
+    px[:10, 10:] = (1, 0, 0, 1)
+    px[10:, :10] = (0, 0, 1, 1)
+    px[10:, 10:] = (1, 1, 1, 1)
     monkeypatch.setattr(rasterdoc, "composite_array", lambda doc: px, raising=False)
     items = export_png.collect_render_items(scene, ab, [])
     assert len(items) == 1 and isinstance(items[0], render2d.ImageItem)
     it = items[0]
     assert (it.x, it.y_top, it.width, it.height) == pytest.approx((50.0, 0.0, 100.0, 100.0))
     img = export_png.render_artboard(scene, ab, 1.0, True)
-    assert tuple(img[25, 75]) == (0, 255, 0, 255)          # top-left quadrant
-    assert tuple(img[25, 125]) == (255, 0, 0, 255)
-    assert tuple(img[75, 75]) == (0, 0, 255, 255)
+
+    def near(pix, rgba):
+        return all(abs(int(a) - int(b)) <= 2 for a, b in zip(pix, rgba))
+    assert near(img[25, 75], (0, 255, 0, 255))              # top-left quadrant
+    assert near(img[25, 125], (255, 0, 0, 255))
+    assert near(img[75, 75], (0, 0, 255, 255))
+    assert near(img[75, 125], (255, 255, 255, 255))
     assert img[50, 20, 3] == 0                              # outside the raster plane
 
 
@@ -447,3 +454,206 @@ def test_svg_gradient_roundtrip(seam, tmp_path):
                                                                                        (0.0, 0.0, 1.0)]
     assert tuple(ra.gradient_center) == pytest.approx((0.25, 0.75), abs=1e-3)
     assert ra.gradient_radius == pytest.approx(0.4, abs=1e-3)
+
+
+# ------------------------------------------------------------------ review fixes: opacity, clips, text, artboard
+
+def test_group_opacity_png_matches_svg_semantics(seam, tmp_path):
+    """Object opacity is group opacity: stroke over fill does not blend twice (like the SVG ``opacity`` attribute)."""
+    require(*PNG_KERNELS, *SVG_KERNELS, "boolean2d.boolean")
+    setup_artboard(100.0, 100.0)
+    r = add_rect(bpy.context.scene, "R", 20, -80, 80, -20, color=(0, 0, 0, 1), stroke=((0, 0, 0, 1), 20.0))
+    r.seam.style.opacity = 0.5
+    img = export_png(tmp_path)
+    outer = pixel(img, 0, 0, 1, 15, -50)        # stroke only (stroke spans x 10..30)
+    inner = pixel(img, 0, 0, 1, 25, -50)        # stroke over the fill
+    deep = pixel(img, 0, 0, 1, 50, -50)         # fill only
+    assert outer[:3] == pytest.approx(inner[:3], abs=1)
+    assert outer[:3] == pytest.approx(deep[:3], abs=1)
+    assert outer[0] == pytest.approx(188, abs=2)           # 50 % black over white
+    p = str(tmp_path / "g.svg")
+    bpy.ops.seam.svg_export(filepath=p)
+    assert 'opacity="0.5"' in open(p, encoding="utf-8").read()       # one group opacity on the single element
+
+
+def test_group_opacity_cut_keeps_opaque_objects_unchanged(seam, tmp_path):
+    from seam_studio.vector import export_png
+    require(*PNG_KERNELS, "boolean2d.boolean")
+    r = add_rect(bpy.context.scene, "R", 20, -80, 80, -20, color=(0, 0, 0, 1), stroke=((1, 0, 0, 1), 10.0))
+    items = export_png.object_items(r)
+    assert len(items) == 2 and len(items[0].rings) == 1                  # untouched at opacity 1
+    r.seam.style.opacity = 0.5
+    items = export_png.object_items(r)
+    assert len(items) == 2 and items[0].fill_rule == "EVENODD"
+    from seam_studio.seam_core import geometry
+    assert len(items[0].rings) == 1                       # the fill shrinks by half the stroke width: 25..75
+    assert abs(geometry.signed_area(items[0].rings[0])) == pytest.approx(50.0 * 50.0, rel=1e-3)
+    r.seam.style.stroke_width = 200.0                     # stroke covers the whole fill -> no fill item left
+    items = export_png.object_items(r)
+    assert len(items) == 1 and items[0].paint.color[0] == pytest.approx(1.0)
+
+
+def test_svg_clipped_raster_is_cut_by_the_mask(seam, tmp_path, monkeypatch):
+    require(*PNG_KERNELS, *SVG_KERNELS)
+    import base64
+    import re
+    from seam_studio.paint import rasterdoc
+    from seam_studio.seam_core import png
+    setup_artboard(200.0, 100.0)
+    scene = bpy.context.scene
+    ras = add_raster_plane(scene, 100.0, -50.0, 100.0)          # x 50..150, y -100..0
+    mask = add_rect(scene, "M", 50, -60, 100, -10)              # left half, y -60..-10
+    ras.seam.clip_source = mask
+    monkeypatch.setattr(rasterdoc, "composite_array", lambda d: np.ones((20, 20, 4), np.float32), raising=False)
+    p = str(tmp_path / "c.svg")
+    assert bpy.ops.seam.svg_export(filepath=p) == {"FINISHED"}
+    txt = open(p, encoding="utf-8").read()
+    data = re.search(r'href="data:image/png;base64,([^"]+)"', txt).group(1)
+    img = png.decode_png(base64.b64decode(data))
+    assert img.shape[:2] == (20, 20)
+    assert img[5, 5, 3] == 255                  # inside the mask (x 50..100 -> columns 0..9, y -10..-60 -> rows 2..11)
+    assert img[10, 4, 3] == 255
+    assert img[15, 4, 3] == 0                   # below the mask
+    assert img[5, 15, 3] == 0                   # right of the mask
+    assert img[0, 0, 3] == 0                    # above the mask
+
+
+def test_svg_nonzero_mask_clip_rule_matches_png(seam, tmp_path):
+    require(*PNG_KERNELS, *SVG_KERNELS, "boolean2d.union_all", "geometry.triangulate")
+    from seam_studio.vector import canvas
+    setup_artboard(100.0, 100.0)
+    scene = bpy.context.scene
+    art = add_rect(scene, "Art", 0, -100, 100, 0, color=(1, 0, 0, 1))
+    outer = poly_path([(-40, -40), (40, -40), (40, 40), (-40, 40)])
+    inner = poly_path([(-20, -20), (20, -20), (20, 20), (-20, 20)])          # same winding: NONZERO keeps it filled
+    mask = canvas.new_shape_object(scene, "Mask", [outer, inner], location=(50, -50))
+    mask.seam.style.fill_rule = "NONZERO"
+    select(art, mask)
+    bpy.ops.seam.clip_make()
+    img = export_png(tmp_path)
+    assert pixel(img, 0, 0, 1, 50, -50)[:3] == (255, 0, 0)                   # PNG: centre is inside the clip
+    p = str(tmp_path / "n.svg")
+    bpy.ops.seam.svg_export(filepath=p)
+    txt = open(p, encoding="utf-8").read()
+    import re
+    d = re.search(r"<clipPath[^>]*><path d=\"([^\"]+)\"", txt).group(1)
+    assert d.count("M") == 1                                                 # resolved to ONE ring: no evenodd hole
+    shapes = import_svg_into_fresh_file(p)
+    assert len(shapes) >= 1
+
+
+def test_svg_evenodd_mask_keeps_exact_clip_path(seam, tmp_path):
+    require(*SVG_KERNELS, "geometry.flatten_path")
+    from seam_studio.vector import canvas
+    from seam_studio.vector.io_svg import svg_clip_paths
+    scene = bpy.context.scene
+    outer = poly_path([(-40, -40), (40, -40), (40, 40), (-40, 40)])
+    inner = poly_path([(-20, -20), (20, -20), (20, 20), (-20, 20)])
+    mask = canvas.new_shape_object(scene, "Mask", [outer, inner], location=(50, -50))
+    mask.seam.style.fill_rule = "EVENODD"
+    assert len(svg_clip_paths(mask)) == 2                                    # evenodd: two sub-paths, a real hole
+    ell = add_ellipse(scene, "E", 0, 0, 10, 10)
+    ell.seam.style.fill_rule = "NONZERO"
+    assert len(svg_clip_paths(ell)) == 1 and len(svg_clip_paths(ell)[0].points) == 4        # single spline: exact Bezier
+
+
+def _text_svg(tmp_path, mode="TEXT"):
+    p = str(tmp_path / "t.svg")
+    assert bpy.ops.seam.svg_export(filepath=p, text_mode=mode) == {"FINISHED"}
+    return open(p, encoding="utf-8").read()
+
+
+def test_svg_text_mode_places_text_at_the_baseline_origin(seam, tmp_path):
+    require(*SVG_KERNELS, "geometry.flatten_path")
+    import re
+    setup_artboard(400.0, 300.0, 100.0, -50.0)
+    bpy.ops.seam.add_text(body="Hello", x=140.0, y=-120.0, size=40.0)
+    txt = _text_svg(tmp_path)
+    m = re.search(r"<text ([^>]*)>Hello</text>", txt)
+    assert m, txt
+    attrs = dict(re.findall(r'([\w-]+)="([^"]*)"', m.group(1)))
+    assert float(attrs["x"]) == pytest.approx(40.0, abs=0.01)             # 140 - artboard x 100
+    assert float(attrs["y"]) == pytest.approx(70.0, abs=0.01)             # artboard top -50 minus baseline -120
+    assert float(attrs["font-size"]) == pytest.approx(40.0)
+    assert "sans-serif" in attrs["font-family"] and "d" not in attrs
+    assert "<path" not in txt
+    outlines = _text_svg(tmp_path, "OUTLINES")
+    assert "<text" not in outlines and "<path" in outlines
+
+
+def test_svg_text_mode_falls_back_to_outlines_with_warning(seam, tmp_path):
+    require(*SVG_KERNELS, "geometry.flatten_path")
+    from seam_studio.vector import io_svg
+    scene = bpy.context.scene
+    setup_artboard(400.0, 300.0)
+    bpy.ops.seam.add_text(body="Two\nLines", x=10, y=-100, size=30)
+    multi = bpy.context.active_object
+    bpy.ops.seam.add_text(body="Plain", x=10, y=-200, size=30)
+    plain = bpy.context.active_object
+    ab = io_svg.canvas.artboards(scene)[0]
+    warnings = []
+    items, _ = io_svg.build_export_items(scene, ab, "TEXT", warnings)
+    by_name = {i.name: i for i in items}
+    assert by_name[plain.name].text == "Plain"
+    assert by_name[multi.name].text is None and len(by_name[multi.name].paths) >= 2          # outlines
+    assert len(warnings) == 1 and "multi-line" in warnings[0] and multi.name in warnings[0]
+    plain.data.align_x = "CENTER"
+    warnings = []
+    items, _ = io_svg.build_export_items(scene, ab, "TEXT", warnings)
+    assert {i.name: i for i in items}[plain.name].text is None and "alignment" in warnings[-1]
+    plain.data.align_x = "LEFT"
+    plain.rotation_euler.z = 0.3
+    warnings = []
+    items, _ = io_svg.build_export_items(scene, ab, "TEXT", warnings)
+    assert {i.name: i for i in items}[plain.name].text is None and "rotation" in " ".join(warnings)
+
+
+def test_svg_import_keeps_a_customised_default_artboard(seam, tmp_path):
+    require(*SVG_KERNELS, "geometry.flatten_path")
+    from seam_studio.vector import canvas
+    src = os.path.join(FIXTURES, "shapes.svg")
+    bpy.ops.wm.read_homefile(use_empty=True)
+    from seam_studio.engine import core
+    core.reset()
+    scene = bpy.context.scene
+    canvas.ensure_canvas(scene)
+    ab0 = canvas.artboards(scene)[0]
+    ab0.seam.artboard.width, ab0.seam.artboard.height = 640.0, 480.0         # user configured it
+    ab0.name = "My Board"
+    assert bpy.ops.seam.svg_import(filepath=src) == {"FINISHED"}
+    abs_ = canvas.artboards(scene)
+    assert len(abs_) == 2 and abs_[0].name == "My Board"
+    assert (abs_[0].seam.artboard.width, abs_[0].seam.artboard.height) == (640.0, 480.0)
+    # a pristine factory artboard is still reused
+    bpy.ops.wm.read_homefile(use_empty=True)
+    core.reset()
+    assert bpy.ops.seam.svg_import(filepath=src) == {"FINISHED"}
+    assert len(canvas.artboards(bpy.context.scene)) == 1
+
+
+def test_png_export_of_a_real_paint_raster_document(seam, tmp_path):
+    """RASTER objects created by paint export through ``rasterdoc.composite_array`` (skipped without paint)."""
+    require(*PNG_KERNELS)
+    from seam_studio.paint import rasterdoc
+    if not hasattr(rasterdoc, "new_raster_doc"):
+        pytest.skip("paint pending: rasterdoc.new_raster_doc")
+    scene = bpy.context.scene
+    setup_artboard(200.0, 100.0)
+    rasterdoc.new_raster_doc(scene, "Pic", 40, 20, "WHITE", x=10.0, y=-10.0)       # plane x 10..50, y -30..-10
+    img = export_png(tmp_path, transparent=True)
+    assert pixel(img, 0, 0, 1, 20, -20) == (255, 255, 255, 255)           # inside the plane: white background
+    assert pixel(img, 0, 0, 1, 100, -20)[3] == 0                          # outside: transparent
+    plane = scene.seam.rasters[0].canvas
+    plane.scale.x = 2.0                                                    # the plane owns the extent: stretch
+    bpy.context.view_layer.update()
+    from seam_studio.vector import export_png as ep
+    item = [i for i in ep.collect_render_items(scene, canvas_ab(scene)) if hasattr(i, "rgba")][0]
+    assert (item.x, item.y_top, item.width, item.height) == pytest.approx((10.0, -10.0, 80.0, 20.0))
+    img = export_png(tmp_path, "wide.png", transparent=True)
+    assert pixel(img, 0, 0, 1, 80, -20)[:3] == (255, 255, 255)            # x 80 is inside the stretched plane (10..90)
+    assert pixel(img, 0, 0, 1, 95, -20)[3] == 0                            # beyond it: transparent
+
+
+def canvas_ab(scene):
+    from seam_studio.vector import canvas
+    return canvas.artboards(scene)[0]

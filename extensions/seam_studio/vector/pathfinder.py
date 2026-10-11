@@ -20,6 +20,7 @@ from typing import List, Optional, Sequence, Tuple
 import bpy
 from bpy.props import BoolProperty, EnumProperty, IntProperty
 
+from .. import ids
 from ..bridge import curve_paths, write_paths
 from ..seam_core import boolean2d, geometry
 from ..seam_core.geometry import BezierPath, BezierPoint
@@ -44,10 +45,21 @@ def selected_shapes(context) -> List[bpy.types.Object]:
             if o.name in sel]
 
 
-def delete_artwork(obj) -> None:
-    """Delete an artwork object with its derived children, release dependants and drop orphaned data."""
+def delete_artwork(obj, drop_orphan_text: bool = True) -> List[str]:
+    """Delete an artwork object with its derived children, release dependants and drop orphaned data.
+
+    * objects clipped by ``obj`` are released (their names are returned so callers can report it);
+    * when ``obj`` is a live text outline and no other outline follows that text any more, the hidden
+      source text is deleted too (it could not be selected, exported or restored from the UI);
+      ``drop_orphan_text=False`` keeps it (``seam.outline_revert`` shows the text again).
+    """
     scene = bpy.context.scene
     sid = obj.seam.id
+    owner_text = None
+    if drop_orphan_text and obj.seam.role == "SHAPE" and obj.seam.owner_id:
+        cand = ids.find_object(obj.seam.owner_id, scene)
+        if cand is not None and cand.type == "FONT" and cand.seam.role == "TEXT":
+            owner_text = cand
     doomed = []
     released = []
     for ob in list(bpy.data.objects):
@@ -69,6 +81,29 @@ def delete_artwork(obj) -> None:
     for ob in doomed:
         _remove_object(ob)
     _remove_object(obj)
+    if owner_text is not None:
+        try:
+            tid = owner_text.seam.id
+            followers = [o for o in bpy.data.objects if o.seam.role == "SHAPE" and o.seam.owner_id == tid]
+        except ReferenceError:
+            return [o.name for o in released]
+        if not followers:
+            delete_artwork(owner_text)
+    return [o.name for o in released]
+
+
+def clipped_inputs_problem(objs) -> Optional[str]:
+    """Error text when some of ``objs`` are clipped (the clip would be lost silently), else None."""
+    clipped = [o for o in objs if o.seam.clip_source is not None and o.seam.clip_source is not o]
+    if not clipped:
+        return None
+    names = ", ".join(f"'{o.name}' (clipped by '{o.seam.clip_source.name}')" for o in clipped)
+    return f"{names}: release the clip first (Clip > Release), a combined shape cannot keep it"
+
+
+def report_released(operator, names) -> None:
+    if names:
+        operator.report({"WARNING"}, "Clip released on: " + ", ".join(names) + " (its mask was removed)")
 
 
 def _remove_object(obj) -> None:
@@ -233,6 +268,10 @@ class SEAM_OT_pathfinder(bpy.types.Operator):
         if len(objs) < 2:
             self.report({"ERROR"}, "Select at least two vector shapes (convert text to outlines first)")
             return {"CANCELLED"}
+        clip_problem = clipped_inputs_problem(objs)
+        if clip_problem:
+            self.report({"ERROR"}, "Pathfinder cannot run: " + clip_problem)
+            return {"CANCELLED"}
         sets, problems = _collect_rings(self, objs, self.resolution)
         if problems:
             self.report({"ERROR"}, "Pathfinder cannot run: " + "; ".join(problems))
@@ -260,8 +299,11 @@ class SEAM_OT_pathfinder(bpy.types.Operator):
         res.seam.style.fill_rule = "EVENODD"
         if not self.keep_originals:
             res.location.z = top_z
+            consumed = {o.name for o in objs}
+            released = []
             for o in objs:
-                delete_artwork(o)
+                released.extend(delete_artwork(o))
+            report_released(self, [n for n in released if n not in consumed])
         select_only(context, res)
         self.report({"INFO"}, f"{label}: {len(shapes)} shape(s), {len(paths)} path(s)")
         return {"FINISHED"}
@@ -287,6 +329,10 @@ class SEAM_OT_compound_make(bpy.types.Operator):
         if len(objs) < 2:
             self.report({"ERROR"}, "Select at least two vector shapes")
             return {"CANCELLED"}
+        clip_problem = clipped_inputs_problem(objs)
+        if clip_problem:
+            self.report({"ERROR"}, "Make Compound Path cannot run: " + clip_problem)
+            return {"CANCELLED"}
         paths = []
         for o in objs:
             paths.extend(canvas_paths(o))
@@ -299,8 +345,11 @@ class SEAM_OT_compound_make(bpy.types.Operator):
                                            layer=_layer_of(scene, top))
         res.seam.style.fill_rule = "EVENODD"
         res.location.z = top_z
+        consumed = {o.name for o in objs}
+        released = []
         for o in objs:
-            delete_artwork(o)
+            released.extend(delete_artwork(o))
+        report_released(self, [n for n in released if n not in consumed])
         select_only(context, res)
         self.report({"INFO"}, f"Compound path with {len(paths)} sub-paths")
         return {"FINISHED"}
@@ -345,7 +394,14 @@ class SEAM_OT_compound_release(bpy.types.Operator):
                 ob.location.z = z0 + i * 1e-4
                 copy_style(src.seam.style, ob.seam.style)
                 made.append(ob)
-            delete_artwork(src)
+            mask = src.seam.clip_source
+            if mask is not None and mask is not src:
+                from .clip import apply_clip
+                try:
+                    apply_clip(scene, mask, made[-len(paths):])
+                except ValueError as exc:
+                    self.report({"WARNING"}, str(exc))
+            report_released(self, [n for n in delete_artwork(src)])
         if not made:
             self.report({"ERROR"}, "No compound shape selected")
             return {"CANCELLED"}
