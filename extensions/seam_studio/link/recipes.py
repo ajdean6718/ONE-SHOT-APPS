@@ -147,7 +147,11 @@ def _orient2(u, v, w):
 
 
 def _ring_self_intersects(ring) -> Optional[Tuple[float, float]]:
-    """First proper intersection between non-adjacent edges of a closed ring (numpy, blockwise)."""
+    """First proper intersection between non-adjacent edges of a closed ring.
+
+    Sort-and-sweep on x (numpy): only edge pairs whose x-ranges overlap are tested, so typical
+    outlines cost O(n log n); candidate pairs are processed in bounded chunks.
+    """
     n = len(ring)
     if n < 4:
         return None
@@ -155,35 +159,53 @@ def _ring_self_intersects(ring) -> Optional[Tuple[float, float]]:
     a1 = np.roll(a0, -1, axis=0)
     mn = np.minimum(a0, a1)
     mx = np.maximum(a0, a1)
-    idx = np.arange(n)
-    block = 256
-    for s in range(0, n, block):
-        e = min(n, s + block)
-        i = idx[s:e, None]
-        j = idx[None, :]
-        cand = (j > i + 1) & ~((i == 0) & (j == n - 1))
-        cand &= (mn[None, :, 0] <= mx[s:e, None, 0]) & (mn[s:e, None, 0] <= mx[None, :, 0])
-        cand &= (mn[None, :, 1] <= mx[s:e, None, 1]) & (mn[s:e, None, 1] <= mx[None, :, 1])
-        ii, jj = np.nonzero(cand)
-        if not len(ii):
-            continue
-        ii = ii + s
-        p0, p1, q0, q1 = a0[ii], a1[ii], a0[jj], a1[jj]
-        d1 = _orient2(p0, p1, q0)
-        d2 = _orient2(p0, p1, q1)
-        d3 = _orient2(q0, q1, p0)
-        d4 = _orient2(q0, q1, p1)
-        scale = np.maximum(np.abs(p1 - p0).max(axis=1), np.abs(q1 - q0).max(axis=1)) ** 2
-        tol = 1e-12 * np.maximum(scale, 1.0)
-        hit = (((d1 > tol) & (d2 < -tol)) | ((d1 < -tol) & (d2 > tol))) & \
-              (((d3 > tol) & (d4 < -tol)) | ((d3 < -tol) & (d4 > tol)))
-        k = np.nonzero(hit)[0]
-        if len(k):
-            k = k[0]
-            t = d3[k] / (d3[k] - d4[k])
-            pt = p0[k] + t * (p1[k] - p0[k])
-            return (float(pt[0]), float(pt[1]))
+    order = np.argsort(mn[:, 0], kind="stable")
+    smin_x = mn[order, 0]
+    ends = np.searchsorted(smin_x, mx[order, 0], side="right")
+    counts = np.maximum(ends - (np.arange(n) + 1), 0)
+    csum = np.cumsum(counts)
+    chunk = 1 << 21
+    i0 = 0
+    while i0 < n:
+        base = csum[i0 - 1] if i0 else 0
+        i1 = int(np.searchsorted(csum, base + chunk, side="right"))
+        i1 = max(i1, i0 + 1)
+        i1 = min(i1, n)
+        cnt = counts[i0:i1]
+        total = int(cnt.sum())
+        if total:
+            rel = np.repeat(np.arange(i0, i1), cnt)
+            offs = np.arange(total) - np.repeat(np.cumsum(cnt) - cnt, cnt)
+            a = order[rel]
+            b = order[rel + 1 + offs]
+            keep = (mn[a, 1] <= mx[b, 1]) & (mn[b, 1] <= mx[a, 1])
+            d = np.abs(a - b)
+            keep &= (d != 1) & (d != n - 1) & (d != 0)
+            a, b = a[keep], b[keep]
+            if len(a):
+                hit = _first_crossing(a0[a], a1[a], a0[b], a1[b])
+                if hit is not None:
+                    return hit
+        i0 = i1
     return None
+
+
+def _first_crossing(p0, p1, q0, q1):
+    d1 = _orient2(p0, p1, q0)
+    d2 = _orient2(p0, p1, q1)
+    d3 = _orient2(q0, q1, p0)
+    d4 = _orient2(q0, q1, p1)
+    scale = np.maximum(np.abs(p1 - p0).max(axis=1), np.abs(q1 - q0).max(axis=1)) ** 2
+    tol = 1e-12 * np.maximum(scale, 1.0)
+    hit = (((d1 > tol) & (d2 < -tol)) | ((d1 < -tol) & (d2 > tol))) & \
+          (((d3 > tol) & (d4 < -tol)) | ((d3 < -tol) & (d4 > tol)))
+    k = np.nonzero(hit)[0]
+    if not len(k):
+        return None
+    k = k[0]
+    t = d3[k] / (d3[k] - d4[k])
+    pt = p0[k] + t * (p1[k] - p0[k])
+    return (float(pt[0]), float(pt[1]))
 
 
 def _issue_text(message, point) -> str:

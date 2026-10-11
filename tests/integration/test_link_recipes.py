@@ -177,3 +177,52 @@ def test_revolve_wiring_with_contract_stub(engine, monkeypatch, orientation):
     assert ex[0] == pytest.approx(1.2, abs=1e-2)  # radius 60 px both sides
     assert co[:, 2].min() == pytest.approx(0.0, abs=1e-6)  # BOTTOM: object stands on its origin
     assert set(mats.tolist()) == {1}
+
+
+def test_fast_signature_matches_contract(engine):
+    import numpy as np
+    from seam_studio.link import producer
+    rng = np.random.default_rng(7)
+    for _ in range(5):
+        co = rng.normal(size=(50, 3)).astype(np.float32) * 3
+        co[0] = (0.123455, -0.000005, 2.500005)  # rounding edge cases
+        totals = rng.integers(3, 6, size=20)
+        corners = rng.integers(0, 50, size=int(totals.sum()))
+        assert producer._signature_arrays(co, totals, corners) == producer.reference_signature(co, totals, corners)
+    assert producer._signature_arrays(np.zeros((0, 3)), np.zeros(0, int), np.zeros(0, int)) == \
+        producer.reference_signature(np.zeros((0, 3)), np.zeros(0, int), np.zeros(0, int))
+    src = make_shape("A")
+    link = make_link(src)
+    me = link.target.data
+    co = np.array([v.co[:] for v in me.vertices])
+    totals = [p.loop_total for p in me.polygons]
+    corners = [lp.vertex_index for lp in me.loops]
+    assert producer.reference_signature(co, totals, corners) == link.target_signature
+
+
+def _brute(ring):
+    from seam_studio.link import recipes
+    import numpy as np
+    n = len(ring)
+    p = np.asarray(ring, float)
+    for i in range(n):
+        for j in range(i + 2, n):
+            if i == 0 and j == n - 1:
+                continue
+            hit = recipes._first_crossing(p[[i]], p[[(i + 1) % n]], p[[j]], p[[(j + 1) % n]])
+            if hit is not None:
+                return True
+    return False
+
+
+def test_sweep_intersection_matches_brute_force():
+    import random
+    from seam_studio.link import recipes
+    rnd = random.Random(3)
+    for trial in range(60):
+        n = rnd.randint(4, 40)
+        ring = [(rnd.uniform(0, 100), rnd.uniform(0, 100)) for _ in range(n)]
+        if trial % 3 == 0:  # star-shaped (simple) polygons too
+            import math
+            ring = sorted(ring, key=lambda p: math.atan2(p[1] - 50, p[0] - 50))
+        assert (recipes._ring_self_intersects(ring) is not None) == _brute(ring), ring

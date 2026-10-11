@@ -94,10 +94,29 @@ def read_mesh_signature(me) -> str:
     return _signature_arrays(co.reshape(nv, 3), totals, corners)
 
 
-def _signature_arrays(co: np.ndarray, totals: np.ndarray, corners: np.ndarray) -> str:
-    verts = co.astype(np.float64).tolist()
-    faces = np.split(corners, np.cumsum(totals)[:-1]) if len(totals) else []
-    return mesh_signature(verts, [f.tolist() for f in faces])
+def _signature_arrays(co: np.ndarray, totals: np.ndarray, corners: np.ndarray, decimals: int = 5) -> str:
+    """Byte-identical, vectorized equivalent of ``seam_core.mesh.mesh_signature`` (same digest)."""
+    import hashlib
+    co = np.asarray(co, dtype=np.float64).reshape(-1, 3)
+    totals = np.asarray(totals, dtype=np.int64)
+    corners = np.asarray(corners, dtype=np.int64)
+    h = hashlib.blake2b(digest_size=16)
+    h.update(np.array([len(co), len(totals)], dtype="<u4").tobytes())
+    q = 10 ** decimals
+    h.update(np.round(co * q).astype("<i8").tobytes())
+    if len(totals):
+        starts = np.zeros(len(totals), dtype=np.int64)
+        np.cumsum(totals[:-1], out=starts[1:])
+        stream = np.insert(corners, starts, totals)
+        h.update(stream.astype("<u4").tobytes())
+    return h.hexdigest()
+
+
+def reference_signature(co, totals, corners) -> str:
+    """The contract implementation (slow, pure Python); used by tests to prove equivalence."""
+    co = np.asarray(co, dtype=np.float64).reshape(-1, 3)
+    faces = np.split(np.asarray(corners), np.cumsum(totals)[:-1]) if len(totals) else []
+    return mesh_signature(co.tolist(), [f.tolist() for f in faces])
 
 
 # ------------------------------------------------------------------ conflict detection (D10)
