@@ -64,16 +64,26 @@ def test_merge_down_lower_opacity_and_mask_with_binary_upper(seam, kernel):
     assert err < 8e-3, err
 
 
-def test_merge_down_reports_the_approximate_cases(seam, kernel):
-    # partial upper alpha over a half-opacity lower layer: the kernel model is not associative, so the look moves
+def test_merge_down_normal_pair_is_exact_with_partial_alpha(seam, kernel):
+    # Porter-Duff over is associative: partial upper alpha over a half-opacity lower layer merges without a look change
     err, _doc = merge_error(lambda doc: setattr(doc.layers[0], "opacity", 0.5), upper=noise(5, 6, 2))
-    assert 0.01 < err < 0.3, err
+    assert err < 6e-3, err
+
+
+def test_merge_down_reports_the_approximate_cases(seam, kernel):
+    # a blend mode depends on everything below the pair, so merging a SCREEN layer into a half-opacity lower layer moves the look
+    def cfg(doc):
+        doc.layers[0].opacity = 0.5
+        doc.layers[1].blend_mode = "SCREEN"
+    err, _doc = merge_error(cfg, upper=noise(5, 6, 2))
+    assert 0.01 < err < 1.0, err
     r = rd()
     doc = new_doc(6, 5, "Mr", "WHITE")
     r.add_layer(doc, "Top")
     paint_pixels(doc.layers[0], opaque(5, 6, 1))
     paint_pixels(doc.layers[1], noise(5, 6, 2))
     doc.layers[0].opacity = 0.5
+    doc.layers[1].blend_mode = "SCREEN"
     doc.active_layer_index = 1
     assert bpy.ops.seam.raster_layer_merge_down() == {"FINISHED"}  # warns, does not refuse
     assert len(cur().layers) == 1

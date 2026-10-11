@@ -204,6 +204,147 @@ def test_composite_multiply_blend_and_hidden_layer_and_background():
     assert empty.shape == (3, 2, 4) and not empty.any()
 
 
+def _legacy_composite(layers, height, width, background=None):
+    """The pre-W3C implementation (colour mixed by f only, backdrop alpha ignored), kept as a reference for opaque backdrops."""
+    out = np.zeros((height, width, 4), dtype=np.float64)
+    if background is not None:
+        out[...] = np.asarray(background, dtype=np.float64).reshape(4)
+    for lyr in layers:
+        if not lyr.visible:
+            continue
+        src = np.asarray(lyr.rgba, dtype=np.float64)
+        f = src[..., 3] * float(lyr.opacity)
+        if lyr.mask is not None:
+            f = f * np.asarray(lyr.mask, dtype=np.float64)
+        f = np.clip(f, 0.0, 1.0)
+        prev_rgb, prev_a = out[..., :3], out[..., 3]
+        blended = R.blend_rgb(lyr.blend_mode, prev_rgb, src[..., :3]).astype(np.float64)
+        mixed = prev_rgb + (blended - prev_rgb) * f[..., None]
+        rgb = np.where((prev_a > 0.0)[..., None], mixed, src[..., :3])
+        rgb = np.where((f > 0.0)[..., None], rgb, prev_rgb)
+        out[..., :3] = rgb
+        out[..., 3] = prev_a + f * (1.0 - prev_a)
+    return out.astype(np.float32)
+
+
+def _reference_pixel(layers, ix, iy, background):
+    """float64 per-pixel scalar implementation of the W3C formula (independent of the vectorised kernel)."""
+    cb = np.zeros(3)
+    ab = 0.0
+    if background is not None:
+        bg = np.asarray(background, dtype=np.float64)
+        cb, ab = bg[:3].copy(), float(bg[3])
+    for lyr in layers:
+        if not lyr.visible:
+            continue
+        px = np.asarray(lyr.rgba, dtype=np.float64)[iy, ix]
+        cs = px[:3]
+        a_s = px[3] * lyr.opacity
+        if lyr.mask is not None:
+            a_s *= float(lyr.mask[iy, ix])
+        a_s = min(max(a_s, 0.0), 1.0)
+        b = R.blend_rgb(lyr.blend_mode, cb, cs)
+        cs2 = (1.0 - ab) * cs + ab * b
+        ao = a_s + ab * (1.0 - a_s)
+        co = np.zeros(3) if ao == 0.0 else (a_s * cs2 + ab * cb * (1.0 - a_s)) / ao
+        cb, ab = co, ao
+    return np.concatenate([cb, [ab]])
+
+
+def test_composite_half_transparent_red_backdrop_half_blue_layer():
+    """50% red under 50% blue: alpha-over gives 1/3 red + 2/3 blue at alpha 0.75 (not 0.5/0.5)."""
+    red = np.tile(np.array([1.0, 0.0, 0.0, 0.5], np.float32), (2, 2, 1))
+    blue = np.tile(np.array([0.0, 0.0, 1.0, 0.5], np.float32), (2, 2, 1))
+    out = R.composite([R.LayerSpec(red), R.LayerSpec(blue)], 2, 2)
+    assert np.allclose(out[..., 0], 1.0 / 3.0, atol=1e-6)
+    assert np.allclose(out[..., 1], 0.0, atol=1e-6)
+    assert np.allclose(out[..., 2], 2.0 / 3.0, atol=1e-6)
+    assert np.allclose(out[..., 3], 0.75, atol=1e-6)
+
+
+def test_composite_semi_transparent_backdrop_color_background():
+    top = np.tile(np.array([0.0, 0.0, 1.0, 0.5], np.float32), (1, 1, 1))
+    out = R.composite([R.LayerSpec(top)], 1, 1, background=(1.0, 0.0, 0.0, 0.5))
+    assert np.allclose(out[0, 0], [1.0 / 3.0, 0.0, 2.0 / 3.0, 0.75], atol=1e-6)
+
+
+def test_composite_blend_only_acts_where_there_is_a_backdrop():
+    """Multiply over a 50% white backdrop: Cs' = 0.5*Cs + 0.5*(Cb*Cs); over nothing the layer colour is unchanged."""
+    cs = np.array([0.2, 0.4, 0.8], np.float64)
+    base = np.zeros((1, 2, 4), np.float32)
+    base[0, 0] = [1.0, 1.0, 1.0, 0.5]
+    top = np.zeros((1, 2, 4), np.float32)
+    top[0, :, :3] = cs
+    top[0, :, 3] = 1.0
+    out = R.composite([R.LayerSpec(base), R.LayerSpec(top, blend_mode="MULTIPLY")], 1, 2)
+    assert np.allclose(out[0, 0, :3], 0.5 * cs + 0.5 * cs, atol=1e-6)   # white * cs == cs
+    assert np.allclose(out[0, 1, :3], cs, atol=1e-6)                      # transparent backdrop: plain layer colour
+    base2 = np.tile(np.array([0.5, 0.5, 0.5, 0.5], np.float32), (1, 1, 1))
+    out2 = R.composite([R.LayerSpec(base2), R.LayerSpec(top[:, :1], blend_mode="MULTIPLY")], 1, 1)
+    assert np.allclose(out2[0, 0, :3], 0.5 * cs + 0.5 * (0.5 * cs), atol=1e-6)
+    assert np.allclose(out2[0, 0, 3], 1.0)
+
+
+def test_composite_fully_transparent_result_is_black_zero_alpha():
+    a = np.tile(np.array([0.9, 0.8, 0.7, 0.0], np.float32), (2, 2, 1))
+    out = R.composite([R.LayerSpec(a), R.LayerSpec(a, blend_mode="SCREEN")], 2, 2)
+    assert not out.any()
+    out = R.composite([R.LayerSpec(a)], 2, 2, background=(0.5, 0.5, 0.5, 0.0))
+    assert not out.any()
+
+
+def test_composite_normal_is_associative_porter_duff_over():
+    rng = np.random.default_rng(5)
+    ls = [rng.random((6, 7, 4)).astype(np.float32) for _ in range(3)]
+    full = R.composite([R.LayerSpec(x) for x in ls], 6, 7)
+    low = R.composite([R.LayerSpec(ls[0]), R.LayerSpec(ls[1])], 6, 7)
+    merged = R.composite([R.LayerSpec(low), R.LayerSpec(ls[2])], 6, 7)
+    assert np.allclose(full, merged, atol=1e-6)
+    full2 = R.composite([R.LayerSpec(x) for x in ls], 6, 7)
+    inner = R.composite([R.LayerSpec(ls[1]), R.LayerSpec(ls[2])], 6, 7)
+    assert np.allclose(full2, R.composite([R.LayerSpec(ls[0]), R.LayerSpec(inner)], 6, 7), atol=1e-6)
+
+
+@pytest.mark.parametrize("mode", R.BLEND_MODES)
+def test_composite_matches_float64_reference_random(mode):
+    rng = np.random.default_rng(100 + R.BLEND_MODES.index(mode))
+    h, w = 5, 6
+    for trial in range(3):
+        layers = []
+        for i in range(3):
+            rgba = rng.random((h, w, 4))
+            rgba[rng.random((h, w)) < 0.15, 3] = 0.0     # exact transparent pixels
+            rgba[rng.random((h, w)) < 0.15, 3] = 1.0     # exact opaque pixels
+            mask = rng.random((h, w)) if i == 1 else None
+            layers.append(R.LayerSpec(rgba.astype(np.float32), opacity=float(rng.random()),
+                                      blend_mode=mode if i else "NORMAL", mask=None if mask is None else mask.astype(np.float32),
+                                      visible=bool(i != 2 or trial != 0)))
+        bg = None if trial == 0 else (tuple(rng.random(3)) + (float(rng.random()),))
+        got = R.composite(layers, h, w, bg)
+        want = np.array([[_reference_pixel(layers, x, y, bg) for x in range(w)] for y in range(h)])
+        assert got.dtype == np.float32 and got.shape == (h, w, 4)
+        assert np.allclose(got, want, atol=2e-5, rtol=1e-4), (mode, trial, np.abs(got - want).max())
+
+
+@pytest.mark.parametrize("mode", R.BLEND_MODES)
+def test_composite_opaque_backdrop_unchanged_vs_legacy(mode):
+    rng = np.random.default_rng(900 + R.BLEND_MODES.index(mode))
+    h, w = 6, 7
+    base = rng.random((h, w, 4)).astype(np.float32)
+    base[..., 3] = 1.0
+    mid = rng.random((h, w, 4)).astype(np.float32)
+    top = rng.random((h, w, 4)).astype(np.float32)
+    top[rng.random((h, w)) < 0.2, 3] = 0.0
+    mask = rng.random((h, w)).astype(np.float32)
+    layers = [R.LayerSpec(base), R.LayerSpec(mid, blend_mode=mode, opacity=0.8),
+              R.LayerSpec(top, blend_mode=mode, opacity=0.65, mask=mask)]
+    assert np.allclose(R.composite(layers, h, w), _legacy_composite(layers, h, w), atol=1e-6)
+    # an opaque background colour under all-partial layers behaves the same way
+    layers2 = [R.LayerSpec(mid, blend_mode=mode, opacity=0.8), R.LayerSpec(top, blend_mode=mode, mask=mask)]
+    bg = (0.3, 0.6, 0.2, 1.0)
+    assert np.allclose(R.composite(layers2, h, w, bg), _legacy_composite(layers2, h, w, bg), atol=1e-6)
+
+
 def test_composite_validates():
     with pytest.raises(ValueError):
         R.composite([R.LayerSpec(np.zeros((2, 2, 4), np.float32), blend_mode="BAD")], 2, 2)
