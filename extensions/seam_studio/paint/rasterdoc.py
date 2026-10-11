@@ -1564,13 +1564,14 @@ def pack_images(scene) -> int:
 
 
 def pack_layer_images(doc) -> int:
-    """Pack the dirty/unpacked layer and mask images of ``doc`` (not the derived composite or the selection).
+    """Pack the dirty/unpacked layer, mask and selection images of ``doc`` (not the derived composite).
 
     Generated images carry no pixels in a ``.blend`` unless packed, and Blender's auto save / quit.blend /
     Recover Last Session write the last undo (memfile) step *without* running ``save_pre``.  SEAM therefore packs
-    right before it pushes an undo step for a pixel edit, and when a paint session has been idle, so the memfile
-    that auto save writes holds the pixels.  Returns the number of images packed."""
-    return _pack_doc(doc, composite=False, selection=False)
+    right before an undo step is pushed for a pixel edit (and when painting has paused), so the memfile that auto save
+    writes holds the pixels.  Strokes of a paint session that is still running are only part of the next memfile step
+    (Blender records none while an object is in a paint mode).  Returns the number of images packed."""
+    return _pack_doc(doc, composite=False, selection=True)
 
 
 def purge_orphan_images() -> int:

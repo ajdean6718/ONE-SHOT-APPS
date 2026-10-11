@@ -95,6 +95,11 @@ def undoable_in_paint_mode(execute):
                 _enter_paint_mode(context, doc_id)
             raise
         if in_paint:
+            if bpy.app.background and "FINISHED" in result:
+                # no timers: paint mode is re-entered before the operator returns, so its own UNDO push would be an
+                # image-type step without scene data.  Push the memfile step now (scripts and tests that run an
+                # operator in paint mode and expect to stay in it).
+                bpy.ops.ed.undo_push(message=self.bl_label)
             _reenter_paint_later(doc_id)
         return result
     return wrapper

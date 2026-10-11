@@ -202,6 +202,49 @@ def run():
         yield 1.0
         state("redo_2")
 
+    elif SCENARIO in ("autosave_memfile", "autosave_paint", "autosave_stroke"):
+        import glob
+        tmp = os.environ["SEAM_AUTOSAVE_DIR"]
+        prefs = bpy.context.preferences
+        prefs.filepaths.temporary_directory = tmp
+        prefs.filepaths.use_auto_save_temporary_files = True
+        prefs.filepaths.auto_save_time = 1
+        if SCENARIO == "autosave_memfile":
+            with bpy.context.temp_override(**ov):  # Object mode: the active undo step is a memfile step
+                bpy.ops.seam.raster_paint_mode("EXEC_DEFAULT", True, enter=False)
+            yield 0.5
+        # (autosave_paint keeps painting mode: the operators below run from Texture Paint mode)
+        if SCENARIO == "autosave_stroke":
+            cur().active_layer_index = 0
+            setup_brush()
+            ip = bpy.context.scene.tool_settings.image_paint
+            ip.brush.color = (0, 1, 0)
+            yield from real_stroke((8, 50), (56, 50))
+            yield 3.0                             # painting paused: SEAM packs the stroke
+            with bpy.context.temp_override(**ov):
+                bpy.ops.seam.raster_paint_mode("EXEC_DEFAULT", True, enter=False)
+            yield 0.5
+        if SCENARIO != "autosave_stroke":
+            op(bpy.ops.seam.raster_fill, color=(1, 0, 0, 1), opacity=1.0)
+            yield 0.5
+        op(bpy.ops.seam.raster_layer_add, name="Top")
+        yield 0.5
+        op(bpy.ops.seam.raster_select_rect, x0=0, y0=0, x1=32, y1=64)
+        yield 0.3
+        op(bpy.ops.seam.raster_fill, color=(0, 0, 1, 1))
+        yield 1.0
+        out["m"]["mode"] = cur().canvas.mode
+        out["m"]["layers"] = [[int(v) for v in rd.read_image_srgb8(ly.image)[10, 10]] for ly in cur().layers]
+        x0 = rd.read_image_srgb8(cur().layers[0].image)
+        out["m"]["greens"] = int(((x0[..., 1] > 200) & (x0[..., 0] < 60) & (x0[..., 3] > 200)).sum())
+        out["m"]["has_sel"] = bool(cur().has_selection)
+        for _ in range(100):
+            if glob.glob(os.path.join(tmp, "*autosave*.blend")):
+                break
+            yield 1.0
+        yield 2.0
+        out["m"]["autosaves"] = glob.glob(os.path.join(tmp, "*autosave*.blend"))
+
     out["ok"] = True
 
 
