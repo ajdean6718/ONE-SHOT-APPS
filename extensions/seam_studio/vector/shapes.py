@@ -6,6 +6,10 @@
   geometry and the curve is regenerated when a parameter changes; when the curve was edited by
   hand (curve signature differs from the one stored after the last generation) the shape is
   *expanded*: ``kind`` becomes NONE and the nodes own the geometry from then on.
+  The generation signature (``recipe:curve``) lives on the **Curve datablock** it describes, not on
+  the object: memfile undo can keep (reuse) a Curve that the engine regenerated after an undo while it
+  re-reads the Object with an older recipe. Geometry and its signature therefore always come back
+  together, and a recipe that differs from the recorded one means "regenerate", never "hand edit".
 * Operators: ``seam.add_shape``, ``seam.shape_expand``.
 """
 
@@ -36,8 +40,15 @@ def curve_signature(obj) -> str:
 
 
 def mark_generated(obj) -> None:
-    """Record that the curve currently equals what the recipe generates."""
-    canvas.set_sig(obj, "shape", recipe_signature(obj.seam.shape) + ":" + curve_signature(obj))
+    """Record (on the curve datablock) that the curve currently equals what the recipe generates."""
+    canvas.set_sig(obj.data, "shape", recipe_signature(obj.seam.shape) + ":" + curve_signature(obj))
+    canvas.set_sig(obj, "shape", None)  # legacy location (files written before the signature moved to the curve)
+
+
+def generated_signature(obj) -> Optional[str]:
+    """``recipe:curve`` recorded when the curve was last generated (curve datablock; legacy: the object)."""
+    sig = canvas.get_sig(obj.data, "shape") if obj.data is not None else None
+    return sig if sig is not None else canvas.get_sig(obj, "shape")
 
 
 def regenerate(obj) -> None:
@@ -131,7 +142,7 @@ class ShapeProducer(engine.Producer):
 
     def stored_signature(self, scene, key):
         ob = self._obj(scene, key)
-        return None if ob is None else canvas.get_sig(ob, "shape")
+        return None if ob is None else generated_signature(ob)
 
     def build(self, scene, key, signature):
         ob = self._obj(scene, key)
@@ -140,8 +151,10 @@ class ShapeProducer(engine.Producer):
         if ob.mode == "EDIT":
             # the user is editing nodes right now: leave the curve alone; judged again on leaving edit mode
             return engine.BuildResult(key, "skipped", "shape is in edit mode")
-        stored = canvas.get_sig(ob, "shape")
+        stored = generated_signature(ob)
         cur_curve = signature.split(":", 1)[1]
+        # hand edit = the curve no longer equals what was generated into *this* curve datablock; a recipe that
+        # differs from the recorded one (parameter edit, or an undo that restored an older recipe) regenerates
         if stored is not None and stored.split(":", 1)[1] != cur_curve:
             expand(ob)
             return engine.BuildResult(key, "ok", "shape edited by hand: parameters released (expanded)")
@@ -154,6 +167,8 @@ def expand(ob) -> None:
     """Release the recipe: the curve nodes own the geometry from now on."""
     ob.seam.shape.kind = "NONE"
     canvas.set_sig(ob, "shape", None)
+    if ob.data is not None:
+        canvas.set_sig(ob.data, "shape", None)
 
 
 class SEAM_OT_add_shape(bpy.types.Operator):

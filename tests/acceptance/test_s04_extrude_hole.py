@@ -133,10 +133,11 @@ def test_fill_materials_and_colours(seam, engine):
             assert abs(abs(p.normal[1]) - 1.0) < 1e-5                              # caps face +-Y
     # changing the fill colour recolours the existing result without rebuilding the geometry
     n = link.build_count
+    co = mesh_np(res).copy()
     comp.seam.style.fill_color = (0.1, 0.6, 0.2, 1.0)
     flush()
     assert tuple(res.data.materials[0].diffuse_color) == pytest.approx((0.1, 0.6, 0.2, 1.0), abs=1e-6)
-    assert link.build_count in (n, n + 1)
+    assert link.build_count == n and np.array_equal(mesh_np(res), co)
 
 
 def test_scale_depth_and_orientation_parameters(seam, engine):

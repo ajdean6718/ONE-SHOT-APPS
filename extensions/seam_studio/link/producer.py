@@ -1,9 +1,19 @@
 """Engine producer for links: signatures, builds per recipe, conflict detection (owner: link).
 
-Key = ``link:<link.id>``. Signature = recipe + params + source paths in the SHAPE2D frame
-(+ fill colour when the result uses the source colour). The target object keeps its
-identity, transform, modifiers and material slots: only its mesh *contents* are rewritten,
-and only when the mesh still matches what the last build wrote (architecture D10).
+Key = ``link:<link.id>``. Signature = recipe + params + source paths in the SHAPE2D frame. The target
+object keeps its identity, transform, modifiers and material slots: only its mesh *contents* are
+rewritten, and only when the mesh still matches what the last build wrote (architecture D10).
+
+Link materials (the SEAM "Face"/"Side" materials tagged ``seam_link_id``) follow the source fill colour.
+They are validated by *comparing the materials themselves* with the source fill (not by a stored
+signature): memfile undo can keep a Material the engine recoloured after an undo while it restores the
+link record, so a stored value could claim "in sync" for a stale colour. A colour-only difference never
+rewrites the mesh: the build only recolours the materials (also while the link is in CONFLICT).
+
+The signature of the mesh a build wrote is stored on the mesh itself (``MESH_SIG_PROP`` /
+``MESH_DATA_SIG_PROP``) as well as on the link record. The mesh copy is authoritative: it is restored and
+reused together with the geometry it describes, and it is shared by every record that drives the same
+target (a "Linked Copy" scene duplicates the link records).
 """
 
 from __future__ import annotations
@@ -24,6 +34,8 @@ classes = ()
 
 KIND = "link"
 MISSING = "missing-source"
+MESH_SIG_PROP = "seam_target_sig"            # mesh custom property: geometry signature the last build wrote
+MESH_DATA_SIG_PROP = "seam_target_data_sig"  # mesh custom property: UV + face-material signature of that build
 # Mesh attributes SEAM itself writes (or Blender adds for them); anything else is user data.
 BUILTIN_ATTRIBUTES = {"position", "material_index", "sharp_face", "sharp_edge", "UVMap"}
 
@@ -80,8 +92,7 @@ def source_signature(scene, link) -> Optional[str]:
     extra = [link.recipe, L.params_signature(link.recipe, params)]
     if recipes.source_mirrored(src, scene):
         extra.append("mirrored")
-    if params.get("use_source_material", True):
-        extra.append(repr(fill_color(src)))
+    # (the fill colour is not part of the geometry signature: see materials_in_sync / update_materials)
     return bridge.paths_signature(paths, extra="|".join(extra).encode())
 
 
@@ -162,14 +173,39 @@ def _has_weights(obj) -> bool:
     return False
 
 
+def stored_target_signatures(link):
+    """(geometry, data) signatures of what the last build wrote into the target mesh.
+
+    The copy on the mesh wins over the link record: it travels with the geometry through undo and is shared
+    by every link record that drives this mesh (scene linked copies)."""
+    me = link.target.data if link.target is not None else None
+    geo = data = None
+    if me is not None:
+        try:
+            geo, data = me.get(MESH_SIG_PROP), me.get(MESH_DATA_SIG_PROP)
+        except ReferenceError:
+            pass
+    geo = geo if isinstance(geo, str) and geo else link.target_signature
+    data = data if isinstance(data, str) and data else link.target_data_signature
+    return geo, data
+
+
+def store_target_signatures(link, me, geo: str, data: str) -> None:
+    link.target_signature = geo
+    link.target_data_signature = data
+    me[MESH_SIG_PROP] = geo
+    me[MESH_DATA_SIG_PROP] = data
+
+
 def target_conflicts(link) -> List[str]:
     """Reasons why writing would destroy downstream edits (empty = safe to write)."""
     obj = link.target
     me = obj.data
     reasons = []
-    if link.target_signature and read_mesh_signature(me) != link.target_signature:
+    geo_sig, data_sig = stored_target_signatures(link)
+    if geo_sig and read_mesh_signature(me) != geo_sig:
         reasons.append("mesh was edited")
-    elif link.target_data_signature and read_data_signature(me) != link.target_data_signature:
+    elif data_sig and read_data_signature(me) != data_sig:
         reasons.append("UVs or face materials were edited")
     if me.shape_keys is not None and len(me.shape_keys.key_blocks):
         reasons.append("shape keys")
@@ -249,16 +285,31 @@ def write_mesh(me, built: recipes.Built) -> str:
     return _signature_arrays(built.verts, built.loop_totals, built.corner_verts)
 
 
-def update_materials(link) -> None:
-    """Keep SEAM-created Face/Side materials of this link in sync with the source fill colour."""
+def _link_materials(link):
+    """(material, wanted RGBA) for every SEAM-owned colour material of a non-decal link that follows the fill."""
     src, tgt = link.source, link.target
-    if src is None or tgt is None or not link.params.use_source_material:
-        return
+    if link.recipe == "DECAL" or src is None or tgt is None or tgt.data is None or not link.params.use_source_material:
+        return []
     from . import ops
     rgba = tuple(src.seam.style.fill_color)
-    for mat in tgt.data.materials:
-        if mat is not None and mat.get("seam_link_id") == link.id:
-            ops.set_material_color(mat, ops.material_color(rgba, mat.get("seam_material_role", "FACE")))
+    return [(mat, ops.material_color(rgba, mat.get("seam_material_role", "FACE")))
+            for mat in tgt.data.materials if mat is not None and mat.get("seam_link_id") == link.id]
+
+
+def materials_in_sync(link) -> bool:
+    """Do the link's Face/Side materials show the source fill colour right now (viewport + Principled)?"""
+    from . import ops
+    try:
+        return all(ops.material_color_matches(mat, want) for mat, want in _link_materials(link))
+    except ReferenceError:
+        return True
+
+
+def update_materials(link) -> None:
+    """Keep SEAM-created Face/Side materials of this link in sync with the source fill colour (idempotent)."""
+    from . import ops
+    for mat, want in _link_materials(link):
+        ops.set_material_color(mat, want)
 
 
 def _apply(link, event: str) -> bool:
@@ -320,6 +371,8 @@ class LinkProducer(engine.Producer):
             return None
         if link.recipe == "DECAL":
             return decal.stored_signature(link)
+        if not materials_in_sync(link):
+            return None  # colour drift (fill edit, or a Material kept by undo): build() recolours, mesh untouched
         return link.source_signature
 
     def build(self, scene, key: str, signature: str) -> engine.BuildResult:
@@ -343,8 +396,17 @@ class LinkProducer(engine.Producer):
             _apply(link, "source_changed")
             link.message = "Paused: the source changed; resume to update"
             return engine.BuildResult(key, "skipped", link.message)
+        if not force and link.recipe != "DECAL" and signature == link.source_signature:
+            # the geometry is current: only the colour materials drifted (never touches the mesh, so it is
+            # safe in CONFLICT and while the result is in Edit Mode too)
+            update_materials(link)
+            if link.state == "LIVE" and link.stale and link.target is not None \
+                    and target_busy_mode(link.target) is None:
+                _apply(link, "build_ok")
+            return engine.BuildResult(key, "ok", "materials re-synced", (time.perf_counter() - t0) * 1000.0)
         if link.state == "CONFLICT" and not force:
             _apply(link, "source_changed")
+            update_materials(link)  # colours never touch the protected mesh
             return engine.BuildResult(key, "conflict", link.message)
         target = link.target
         is_decal = link.recipe == "DECAL"
@@ -359,6 +421,7 @@ class LinkProducer(engine.Producer):
             reasons = target_conflicts(link)
             if reasons:
                 _apply(link, "target_modified")
+                update_materials(link)
                 link.message = "Result edited downstream (%s): Overwrite, Bake or Branch" % ", ".join(reasons)
                 return engine.BuildResult(key, "conflict", link.message)
         try:
@@ -370,6 +433,8 @@ class LinkProducer(engine.Producer):
                 notes = list(built.messages)
         except recipes.RecipeError as exc:
             _apply(link, "build_error")
+            if not is_decal:
+                update_materials(link)
             link.message = str(exc)
             link.source_signature = signature  # do not retry until the source or params change
             if is_decal:
@@ -380,11 +445,11 @@ class LinkProducer(engine.Producer):
             if force and me.shape_keys is not None:
                 target.shape_key_clear()
             groups = _vertex_group_state(target)
-            link.target_signature = write_mesh(me, built)
+            geo_sig = write_mesh(me, built)
             _restore_vertex_groups(target, groups)
             # from the arrays just written (== read_data_signature(me); asserted by the tests)
-            link.target_data_signature = _data_signature_arrays(
-                built.uvs if (built.uvs is not None and len(built.corner_verts)) else None, built.materials)
+            store_target_signatures(link, me, geo_sig, _data_signature_arrays(
+                built.uvs if (built.uvs is not None and len(built.corner_verts)) else None, built.materials))
             if not is_decal:
                 update_materials(link)
         ms = (time.perf_counter() - t0) * 1000.0

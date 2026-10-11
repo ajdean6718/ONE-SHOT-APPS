@@ -72,7 +72,8 @@ def test_parameters_are_independent(seam, engine):
     flush()
     assert a.build_count == n_a + 1 and extent(a.target)[2] == pytest.approx(0.5, abs=1e-4)
     assert (b.target_signature, b.build_count) == (b_sig, b_n) and np.array_equal(mesh_np(b.target), b_co)
-    assert_link_consistent(a) and assert_link_consistent(b)
+    assert_link_consistent(a)
+    assert_link_consistent(b)
 
 
 def test_source_edit_updates_both_in_their_own_frames(seam, engine):

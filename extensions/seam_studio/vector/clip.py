@@ -59,11 +59,15 @@ def clip_key(obj) -> str:
 
 
 def clipped_by(scene, mask) -> List[bpy.types.Object]:
-    return [o for o in scene.objects if o.seam.clip_source is mask and o is not mask]
+    from .style import _alive, scene_index  # per-pass index while the engine runs (O(1) instead of O(objects))
+    idx = scene_index(scene)
+    cands = scene.objects if idx is None else _alive(idx.clipped.get(mask.as_pointer(), ()))
+    return [o for o in cands if o.seam.clip_source is mask and o is not mask]
 
 
 def clip_child(obj):
-    for ch in obj.children:
+    from .style import children_of
+    for ch in children_of(obj):
         if ch.seam.role == "CLIP_RESULT":
             return ch
     return None
@@ -401,6 +405,8 @@ class ClipProducer(Producer):
             child.hide_select = True
             ids.ensure_id(child)
             child.seam.role = "CLIP_RESULT"
+            from .style import index_add
+            index_add(scene, child)
         child.seam.owner_id = ids.ensure_id(obj)
         child.location = (0.0, 0.0, 0.0)
         mesh = child.data

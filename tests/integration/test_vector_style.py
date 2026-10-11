@@ -584,3 +584,120 @@ def test_orphan_gradient_image_is_purged_by_revalidation(doc):
     core.request_revalidate()
     flush()
     assert bpy.data.images.get("SEAM Gradient " + sid) is None
+
+
+def _grad_px(ob):
+    from seam_studio.vector import style
+    img = bpy.data.images[style.gradient_image_name(ob)]
+    buf = np.empty(len(img.pixels), np.float32)
+    img.pixels.foreach_get(buf)
+    return buf.reshape(style.GRADIENT_SIZE, style.GRADIENT_SIZE, 4)
+
+
+def _grad_expected(ob):
+    from seam_studio.vector import style
+    st = ob.seam.style
+    return style.bake_gradient(st.fill_type, st.gradient_angle, tuple(st.gradient_center), st.gradient_radius,
+                               style._stops(st))
+
+
+def test_undo_of_a_gradient_stop_edit_restores_the_gradient_pixels(doc):
+    """Review finding (5.2.2): memfile undo restored the stops and the image's hash but kept the re-baked buffer."""
+    bpy.ops.ed.undo_push(message="start")
+    ob = _rect()
+    name = ob.name
+    st = ob.seam.style
+    st.fill_type = "LINEAR"
+    st.gradient_stops.clear()
+    a = st.gradient_stops.add()
+    a.position, a.color = 0.0, (1.0, 0.0, 0.0, 1.0)
+    b = st.gradient_stops.add()
+    b.position, b.color = 1.0, (0.0, 0.0, 1.0, 1.0)
+    flush()
+    bpy.ops.ed.undo_push(message="gradient red-blue")
+    bpy.data.objects[name].seam.style.gradient_stops[0].color = (0.0, 1.0, 0.0, 1.0)
+    flush()
+    bpy.ops.ed.undo_push(message="stop0 green")
+    assert np.allclose(_grad_px(bpy.data.objects[name]), _grad_expected(bpy.data.objects[name]), atol=1 / 255)
+    assert bpy.ops.ed.undo() == {"FINISHED"}
+    flush()
+    ob = bpy.data.objects[name]
+    assert tuple(ob.seam.style.gradient_stops[0].color) == pytest.approx((1.0, 0.0, 0.0, 1.0))
+    assert np.allclose(_grad_px(ob), _grad_expected(ob), atol=1 / 255)
+    assert tuple(_grad_px(ob)[64, 0]) == pytest.approx((1.0, 0.0, 0.0, 1.0), abs=1 / 255)
+    assert bpy.ops.ed.redo() == {"FINISHED"}
+    flush()
+    ob = bpy.data.objects[name]
+    assert np.allclose(_grad_px(ob), _grad_expected(ob), atol=1 / 255)
+    # nothing changed since: a further revalidation verifies without re-baking
+    from seam_studio.engine import core
+    core.request_revalidate()
+    res = flush()
+    assert all(r.status != "ok" for r in res if r.key.startswith("gradient"))
+
+
+def _showcase(n):
+    from test_link_support import make_shape
+    obs = []
+    for i in range(n):
+        ob = make_shape("S%d" % i, location=(float(i % 10) * 250.0, -float(i // 10) * 250.0))
+        st = ob.seam.style
+        if i % 2 == 0:
+            st.stroke_enabled = True
+            st.stroke_width = 4.0
+        if i % 5 == 0:
+            st.fill_type = "LINEAR"
+        obs.append(ob)
+    flush()
+    return obs
+
+
+def test_one_node_edit_touches_only_its_own_objects(doc):
+    """perf (5.2.2): a gradient re-bake used to re-assign the image node, which tags every object of the scene, so the
+    next pass examined every key (O(document) per edit). The edit must stay local whatever the document size."""
+    obs = _showcase(60)
+    tgt = obs[20]                               # stroked + gradient
+    passes = []
+
+    def handler(scene, dg):
+        passes.append(sum(1 for u in dg.updates if isinstance(u.id, bpy.types.Object)))
+
+    bpy.app.handlers.depsgraph_update_post.append(handler)
+    try:
+        bp = tgt.data.splines[0].bezier_points[1]
+        for attr in ("co", "handle_left", "handle_right"):
+            getattr(bp, attr).x += 3.0
+        tgt.data.update_tag()
+        res = flush()
+    finally:
+        bpy.app.handlers.depsgraph_update_post.remove(handler)
+    assert {r.key.split(":")[0] for r in res if r.status == "ok"} >= {"gradient", "stroke"}
+    assert max(passes) <= 4, passes
+    assert len(res) <= 12, [(r.key, r.status) for r in res]
+
+
+def test_pass_index_lookups_match_direct_scans(doc):
+    from seam_studio.engine import core
+    from seam_studio.vector import clip, style
+    obs = _showcase(12)
+    scene = bpy.context.scene
+    clip.apply_clip(scene, obs[1], [obs[2], obs[3]])
+    flush()
+    direct = {o.seam.id: (sorted(s.name for s in style.strokes_of(scene, o.seam.id)),
+                          sorted(c.name for c in o.children),
+                          sorted(c.name for c in style.users_collection(o, scene))) for o in obs}
+    masked = sorted(o.name for o in clip.clipped_by(scene, obs[1]))
+    core._indexing += 1                         # what the engine does around its key mapping / build loops
+    try:
+        assert style.scene_index(scene) is not None
+        for o in obs:
+            got = (sorted(s.name for s in style.strokes_of(scene, o.seam.id)),
+                   sorted(c.name for c in style.children_of(o, scene)),
+                   sorted(c.name for c in style.users_collection(o, scene)))
+            assert got == direct[o.seam.id], o.name
+            assert style.find_styled(scene, o.seam.id) == o
+        assert sorted(o.name for o in clip.clipped_by(scene, obs[1])) == masked == sorted([obs[2].name, obs[3].name])
+        assert clip.clip_child(obs[2]) is not None and clip.clip_child(obs[2]).seam.role == "CLIP_RESULT"
+    finally:
+        core._indexing -= 1
+    assert style.scene_index(scene) is None

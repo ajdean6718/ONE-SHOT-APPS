@@ -16,6 +16,12 @@ Everything here is derived from ``obj.seam.style`` (single owner of appearance) 
   ``seam_core.stroke.stroke_mesh`` from the flattened local paths. The geometry is built in the space of
   the owner's 2D scale/shear so the stroke keeps a uniform width when the owner is scaled.
 
+Gradient pixels and undo: Blender 5.x memfile undo restores an image's properties (``seam_hash``, the owner's
+stored signature) but keeps the in-memory pixel buffer, which may hold colours baked *after* the restored step.
+The pixels are therefore validated in memory (``_gradient_applied``: owner id -> digest of the gradient the
+buffer was checked or baked for), forgotten on undo / redo / load; the next flush compares the buffer with a
+fresh bake and re-bakes only when it differs.
+
 Gradient angle: 0 = left to right, 90 degrees = bottom to top (canvas Y up). Radial: ``gradient_center``
 and ``gradient_radius`` are fractions of the bounding box (an ellipse for non-square shapes).
 """
@@ -60,6 +66,128 @@ def _r(v, n=5):
 
 def _rgba(c):
     return tuple(_r(x) for x in c)
+
+
+# ------------------------------------------------------------------ per-pass lookup index
+
+class SceneIndex:
+    """One scan of the objects, shared by every lookup of one engine pass (``engine.index_generation``).
+
+    Replaces O(objects) scans per key (``Object.children``, owner -> strokes, mask -> clipped objects) that made a
+    revalidation O(objects^2). Lists are *candidates*: lookups re-check the real predicate (and skip removed
+    objects), and producers that create derived objects during a pass add them with :meth:`add`."""
+
+    def __init__(self, scene):
+        self.scene_ptr = scene.as_pointer()
+        self.children: Dict[int, list] = {}
+        self.strokes: Dict[str, list] = {}
+        self.clipped: Dict[int, list] = {}
+        self.by_id: Dict[str, object] = {}
+        self._cols: Optional[Dict[int, list]] = None
+        for ob in bpy.data.objects:
+            p = ob.parent
+            if p is not None:
+                self.children.setdefault(p.as_pointer(), []).append(ob)
+        for ob in scene.objects:
+            self._add_scene_object(ob)
+
+    def _add_scene_object(self, ob) -> None:
+        seam = ob.seam
+        if seam.id:
+            self.by_id.setdefault(seam.id, ob)
+        if seam.role == "STROKE" and seam.owner_id:
+            self.strokes.setdefault(seam.owner_id, []).append(ob)
+        m = seam.clip_source
+        if m is not None and m != ob:
+            self.clipped.setdefault(m.as_pointer(), []).append(ob)
+
+    def add(self, ob) -> None:
+        """Register an object created during the pass (derived child)."""
+        p = ob.parent
+        if p is not None:
+            self.children.setdefault(p.as_pointer(), []).append(ob)
+        self._add_scene_object(ob)
+        self.forget_collections(ob)
+
+    def collections(self, ob) -> list:
+        """``ob.users_collection`` (an O(collections x objects) Python property) from one scan per pass."""
+        if self._cols is None:
+            cols: Dict[int, list] = {}
+            for col in bpy.data.collections:
+                for o in col.objects:
+                    cols.setdefault(o.as_pointer(), []).append(col)
+            for sc in bpy.data.scenes:
+                for o in sc.collection.objects:
+                    cols.setdefault(o.as_pointer(), []).append(sc.collection)
+            self._cols = cols
+        got = self._cols.get(ob.as_pointer())
+        if got is None:
+            return list(ob.users_collection)
+        return got
+
+    def forget_collections(self, ob) -> None:
+        """The pass itself (un)linked ``ob``: answer from Blender for it from now on."""
+        if self._cols is not None:
+            self._cols.pop(ob.as_pointer(), None)
+
+
+_index: Dict[str, object] = {"gen": None, "index": None}
+
+
+def scene_index(scene) -> Optional[SceneIndex]:
+    """The index of the current engine pass, or None outside the engine (then callers scan directly)."""
+    gen = engine.index_generation()
+    if gen is None:
+        return None
+    idx = _index["index"]
+    if _index["gen"] != gen or idx is None or idx.scene_ptr != scene.as_pointer():
+        idx = SceneIndex(scene)
+        _index["gen"], _index["index"] = gen, idx
+    return idx
+
+
+def index_add(scene, ob) -> None:
+    """Producers call this after creating a derived object during a pass."""
+    idx = _index["index"] if _index["gen"] == engine.index_generation() else None
+    if idx is not None and idx.scene_ptr == scene.as_pointer():
+        idx.add(ob)
+
+
+def _alive(objs):
+    out = []
+    for o in objs:
+        try:
+            o.name
+        except ReferenceError:
+            continue
+        out.append(o)
+    return out
+
+
+def users_collection(ob, scene=None) -> list:
+    idx = scene_index(scene or bpy.context.scene)
+    return list(ob.users_collection) if idx is None else list(idx.collections(ob))
+
+
+def find_styled(scene, sid: str):
+    """``canvas.find_by_id`` through the pass index (verified) when the engine is running."""
+    idx = scene_index(scene)
+    if idx is not None:
+        ob = idx.by_id.get(sid)
+        try:
+            if ob is not None and ob.seam.id == sid:
+                return ob
+        except ReferenceError:
+            pass
+    return canvas.find_by_id(sid, scene)
+
+
+def children_of(obj, scene=None):
+    """``obj.children`` (O(objects) in Blender) through the pass index when the engine is running."""
+    idx = scene_index(scene or bpy.context.scene)
+    if idx is None:
+        return list(obj.children)
+    return [c for c in _alive(idx.children.get(obj.as_pointer(), ())) if c.parent == obj]
 
 
 # ------------------------------------------------------------------ geometry access
@@ -252,7 +380,8 @@ def sync_material(ob) -> bpy.types.Material:
         canvas.flat_material_tree(mat)
         _remove_gradient_nodes(mat.node_tree)
         canvas.set_flat_color(mat, tuple(st.fill_color), float(st.opacity), bool(st.fill_enabled))
-    ob.display_type = "TEXTURED"  # WIRE would draw the fill triangulation; a disabled fill is alpha 0 instead
+    if ob.display_type != "TEXTURED":
+        ob.display_type = "TEXTURED"  # WIRE would draw the fill triangulation; a disabled fill is alpha 0 instead
     return mat
 
 
@@ -271,7 +400,7 @@ class MaterialProducer(engine.Producer):
                 yield "material:" + ob.seam.id
 
     def _obj(self, scene, key):
-        ob = canvas.find_by_id(key.split(":", 1)[1], scene)
+        ob = find_styled(scene, key.split(":", 1)[1])
         return ob if ob is not None and ob.seam.role in STYLED_ROLES else None
 
     def signature(self, scene, key):
@@ -319,6 +448,18 @@ def bake_gradient(fill_type: str, angle: float, center, radius: float, stops, si
     return np.round(out * 255.0).astype(np.float32) / 255.0
 
 
+_gradient_applied: Dict[str, str] = {}  # owner id -> digest whose pixels are known to be in the image buffer
+
+
+def gradient_digest(st) -> str:
+    return hashlib.blake2b(repr(_gradient_params(st)).encode(), digest_size=8).hexdigest()
+
+
+def forget_gradient_pixels() -> None:
+    """Undo / redo / load: the image buffers may not match the restored properties any more."""
+    _gradient_applied.clear()
+
+
 def gradient_image_name(ob) -> str:
     return "SEAM Gradient " + ob.seam.id
 
@@ -355,8 +496,7 @@ def sync_gradient(ob, depsgraph=None) -> None:
     sync_material(ob)
     mat = _owned_material(ob)
     nodes = _ensure_gradient_nodes(mat)
-    params = _gradient_params(st)
-    digest = hashlib.blake2b(repr(params).encode(), digest_size=8).hexdigest()
+    digest = gradient_digest(st)
     if img is not None and (tuple(img.size) != (GRADIENT_SIZE, GRADIENT_SIZE)):
         bpy.data.images.remove(img)
         img = None
@@ -367,18 +507,29 @@ def sync_gradient(ob, depsgraph=None) -> None:
         img["seam_owner"] = ob.seam.id
         img.alpha_mode = "STRAIGHT"
         img["seam_hash"] = ""
-    if img.get("seam_hash") != digest or not img.has_data:
+    if img.get("seam_hash") != digest or not img.has_data or _gradient_applied.get(ob.seam.id) != digest:
         arr = bake_gradient(st.fill_type, st.gradient_angle, tuple(st.gradient_center), st.gradient_radius,
-                            _stops(st))
-        img.pixels.foreach_set(arr.ravel())
-        img.update()
-        img["seam_hash"] = digest
-        try:
-            img.pack()
-        except RuntimeError:
-            pass
-    nodes["gradient"].image = img
-    mat.node_tree.nodes.active = nodes["gradient"]
+                            _stops(st)).ravel()
+        same = False
+        if img.get("seam_hash") == digest and img.has_data:  # after undo/load: verify the buffer, re-bake on mismatch
+            cur = np.empty(arr.size, dtype=np.float32)
+            img.pixels.foreach_get(cur)
+            same = bool(np.allclose(cur, arr, atol=0.5 / 255.0))
+        if not same:
+            img.pixels.foreach_set(arr)
+            img.update()
+            img["seam_hash"] = digest
+            try:
+                img.pack()
+            except RuntimeError:
+                pass
+        _gradient_applied[ob.seam.id] = digest
+    # write only what differs: on Blender 5.x assigning an image-node image (even the same one) re-tags every
+    # object of the scene for update, which made one node edit cost O(document) in the next depsgraph pass
+    if nodes["gradient"].image != img:
+        nodes["gradient"].image = img
+    if mat.node_tree.nodes.active != nodes["gradient"]:
+        mat.node_tree.nodes.active = nodes["gradient"]
     bb = local_bbox(ob, depsgraph)
     n = GRADIENT_SIZE
     k = (n - 1.0) / n
@@ -386,9 +537,14 @@ def sync_gradient(ob, depsgraph=None) -> None:
         w = max(bb[2] - bb[0], 1e-6)
         h = max(bb[3] - bb[1], 1e-6)
         sx, sy = k / w, k / h
-        nodes["mapping"].inputs["Scale"].default_value = (sx, sy, 1.0)
-        nodes["mapping"].inputs["Location"].default_value = (0.5 / n - bb[0] * sx, 0.5 / n - bb[1] * sy, 0.0)
-    nodes["mapping"].inputs["Rotation"].default_value = (0.0, 0.0, 0.0)
+        _set_vector(nodes["mapping"].inputs["Scale"], (sx, sy, 1.0))
+        _set_vector(nodes["mapping"].inputs["Location"], (0.5 / n - bb[0] * sx, 0.5 / n - bb[1] * sy, 0.0))
+    _set_vector(nodes["mapping"].inputs["Rotation"], (0.0, 0.0, 0.0))
+
+
+def _set_vector(socket, value) -> None:
+    if any(abs(float(a) - float(b)) > 1e-9 for a, b in zip(socket.default_value, value)):
+        socket.default_value = value
 
 
 class GradientProducer(engine.Producer):
@@ -411,7 +567,7 @@ class GradientProducer(engine.Producer):
             yield "gradient:" + sid
 
     def _obj(self, scene, key):
-        ob = canvas.find_by_id(key.split(":", 1)[1], scene)
+        ob = find_styled(scene, key.split(":", 1)[1])
         return ob if ob is not None and ob.seam.role in STYLED_ROLES else None
 
     def signature(self, scene, key):
@@ -423,7 +579,11 @@ class GradientProducer(engine.Producer):
 
     def stored_signature(self, scene, key):
         ob = self._obj(scene, key)
-        return None if ob is None else canvas.get_sig(ob, "gradient")
+        if ob is None:
+            return None
+        if ob.seam.style.fill_type != "SOLID" and _gradient_applied.get(ob.seam.id) != gradient_digest(ob.seam.style):
+            return None  # pixel buffer not verified since the last undo / redo / load (or never baked here)
+        return canvas.get_sig(ob, "gradient")
 
     def build(self, scene, key, signature):
         ob = self._obj(scene, key)
@@ -457,7 +617,9 @@ def _scale_key(smat) -> tuple:
 
 
 def strokes_of(scene, owner_id: str) -> List[bpy.types.Object]:
-    return [o for o in scene.objects if o.seam.role == "STROKE" and o.seam.owner_id == owner_id]
+    idx = scene_index(scene)
+    cands = scene.objects if idx is None else _alive(idx.strokes.get(owner_id, ()))
+    return [o for o in cands if o.seam.role == "STROKE" and o.seam.owner_id == owner_id]
 
 
 def stroke_enabled(st) -> bool:
@@ -472,7 +634,7 @@ def stroke_signature(owner, scene, depsgraph=None) -> str:
     _last_scale[owner.seam.id] = _scale_key(smat)
     res = max(int(getattr(owner.data, "resolution_u", 12) or 12), 2)
     psig = paths_signature(owner_paths(owner, depsgraph))
-    cols = ",".join(sorted(c.name for c in owner.users_collection))
+    cols = ",".join(sorted(c.name for c in users_collection(owner, scene)))
     return repr((_rgba(st.stroke_color), _r(st.stroke_width), st.stroke_cap, st.stroke_join, _r(st.miter_limit),
                  _r(st.opacity), _scale_key(smat), res, psig, owner.name, cols,
                  owner.seam.id in _suspect, round(canvas.stroke_z(owner), 8)))
@@ -481,7 +643,7 @@ def stroke_signature(owner, scene, depsgraph=None) -> str:
 def valid_stroke_child(owner):
     """The single healthy stroke child of ``owner`` or None."""
     sid = owner.seam.id
-    kids = [c for c in owner.children if c.seam.role == "STROKE"]
+    kids = [c for c in children_of(owner) if c.seam.role == "STROKE"]
     good = [c for c in kids if c.seam.owner_id == sid]
     if len(good) == 1 and len(kids) == 1:
         return good[0]
@@ -562,19 +724,27 @@ def sync_stroke(owner, scene, depsgraph=None) -> Optional[bpy.types.Object]:
         child.hide_select = True
         child.parent = owner
         child.matrix_parent_inverse = Matrix.Identity(4)
+        index_add(scene, child)
         child.location = (0.0, 0.0, canvas.stroke_z(owner))
         for ax in range(3):
             child.lock_location[ax] = child.lock_rotation[ax] = child.lock_scale[ax] = True
     if child.location.z != canvas.stroke_z(owner):  # the owner may have moved into / out of a group
         child.location.z = canvas.stroke_z(owner)
     # collections follow the owner
-    want = list(owner.users_collection) or [scene.collection]
-    for c in list(child.users_collection):
+    want = users_collection(owner, scene) or [scene.collection]
+    relinked = False
+    for c in users_collection(child, scene):
         if c not in want:
             c.objects.unlink(child)
+            relinked = True
     for c in want:
         if child.name not in c.objects:
             c.objects.link(child)
+            relinked = True
+    if relinked:
+        idx = scene_index(scene)
+        if idx is not None:
+            idx.forget_collections(child)
     if child.name != "SEAM Stroke " + owner.name:
         child.name = "SEAM Stroke " + owner.name
     me = child.data
@@ -590,7 +760,8 @@ def sync_stroke(owner, scene, depsgraph=None) -> Optional[bpy.types.Object]:
             me.materials[0] = mat
         else:
             me.materials.append(mat)
-    mat.name = "SEAM Stroke " + owner.name
+    if mat.name != "SEAM Stroke " + owner.name:
+        mat.name = "SEAM Stroke " + owner.name
     canvas.set_flat_color(mat, tuple(st.stroke_color), float(st.opacity), True)
     return child
 
@@ -629,7 +800,7 @@ class StrokeProducer(engine.Producer):
         return ["stroke:" + i for i in owners]
 
     def _owner(self, scene, sid):
-        ob = canvas.find_by_id(sid, scene)
+        ob = find_styled(scene, sid)
         return ob if ob is not None and ob.seam.role in STYLED_ROLES else None
 
     def signature(self, scene, key):
@@ -649,7 +820,7 @@ class StrokeProducer(engine.Producer):
         child = valid_stroke_child(owner)
         if child is None:
             return None
-        if set(child.users_collection) != set(owner.users_collection):
+        if set(users_collection(child, scene)) != set(users_collection(owner, scene)):
             return None
         me = child.data
         if me is None or not len(me.materials) or me.materials[0] is None:
@@ -820,11 +991,29 @@ classes = (SEAM_OT_gradient_stop_add, SEAM_OT_gradient_stop_remove, SEAM_OT_grad
 _producers = (MaterialProducer(), GradientProducer(), StrokeProducer())
 
 
+@bpy.app.handlers.persistent
+def _on_history_or_load(*_args):
+    forget_gradient_pixels()
+
+
+_HANDLER_LISTS = ("undo_post", "redo_post", "load_post")
+
+
 def register():
     for p in _producers:
         engine.register_producer(p)
+    for name in _HANDLER_LISTS:
+        lst = getattr(bpy.app.handlers, name)
+        if _on_history_or_load not in lst:
+            lst.append(_on_history_or_load)
+    forget_gradient_pixels()
 
 
 def unregister():
     for p in _producers:
         engine.unregister_producer(p.kind)
+    for name in _HANDLER_LISTS:
+        lst = getattr(bpy.app.handlers, name)
+        while _on_history_or_load in lst:
+            lst.remove(_on_history_or_load)
+    forget_gradient_pixels()

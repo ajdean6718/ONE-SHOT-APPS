@@ -167,4 +167,5 @@ def test_style_edits_recolour_without_touching_geometry(seam, engine):
     assert tuple(ta.data.materials[0].diffuse_color) == pytest.approx((0.9, 0.1, 0.1, 1.0), abs=1e-6)
     assert np.array_equal(mesh_np(ta), co)
     assert tuple(lb.target.data.materials[0].diffuse_color) == pytest.approx((0.2, 0.6, 0.9, 1.0), abs=1e-6)
-    assert_link_consistent(la) and assert_link_consistent(lb)
+    assert_link_consistent(la)
+    assert_link_consistent(lb)

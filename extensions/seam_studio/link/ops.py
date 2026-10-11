@@ -27,6 +27,24 @@ def material_color(rgba, role: str):
     return (r, g, b, a)
 
 
+def _same_rgba(a, b) -> bool:
+    return tuple(round(float(c), 6) for c in a) == tuple(round(float(c), 6) for c in b)
+
+
+def material_color_matches(mat, rgba) -> bool:
+    """True when ``set_material_color(mat, rgba)`` would change nothing."""
+    if not _same_rgba(mat.diffuse_color, rgba):
+        return False
+    tree = mat.node_tree
+    if tree is not None:
+        for node in tree.nodes:
+            if node.type == "BSDF_PRINCIPLED":
+                sock = node.inputs.get("Base Color")
+                if sock is not None and not _same_rgba(sock.default_value, rgba):
+                    return False
+    return True
+
+
 def set_material_color(mat, rgba) -> None:
     rgba = tuple(float(c) for c in rgba)
     if tuple(round(c, 6) for c in mat.diffuse_color) != tuple(round(c, 6) for c in rgba):
@@ -531,6 +549,7 @@ class SEAM_OT_link_detach(_LinkOp, bpy.types.Operator):
             return {"CANCELLED"}
         producer._apply(link, "detach")
         link.message = "Baked: no longer follows the source"
+        decal.bake_image(link)  # a raster decal stops sharing the document composite
         for mat in (link.target.data.materials if link.target is not None else ()):
             if mat is not None and mat.get("seam_link_id") == link.id:
                 mat["seam_link_id"] = ""
@@ -721,6 +740,8 @@ def remove_link(scene, link, delete_result: bool = False) -> None:
     idx = next(i for i, lk in enumerate(links) if lk.id == link_id)
     if is_decal and tgt is not None and not owns_target:
         decal.remove_owned_slots(link)  # a Material decal gives the user's mesh its slot back
+    elif is_decal and tgt is not None and not delete_result:
+        decal.bake_image(link)  # the kept plane keeps its picture (own copy of a raster composite)
     links.remove(idx)
     if is_decal:
         decal.forget(link_id)

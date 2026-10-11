@@ -195,3 +195,63 @@ def test_undo_redo_keeps_recipe_and_geometry_consistent(doc):
     ob = bpy.data.objects[name]
     assert ob.seam.shape.width == pytest.approx(300)
     assert _bounds(ob) == pytest.approx((-150, -50, 150, 50), abs=1e-2)
+
+
+def _add_u(kind, **kw):
+    """Like a button press: the operator pushes its undo step."""
+    assert bpy.ops.seam.add_shape("EXEC_DEFAULT", True, kind=kind, **kw) == {"FINISHED"}
+    return bpy.context.active_object
+
+
+def _curve_width(ob):
+    xs = [bp.co.x for sp in ob.data.splines for bp in sp.bezier_points]
+    return max(xs) - min(xs)
+
+
+@pytest.mark.parametrize("next_op", ["add", "move"])
+def test_param_edit_then_two_undos_keeps_the_shape_parametric(doc, next_op):
+    """Review finding: Width edit (step pushed before the engine regenerates), another action, Ctrl+Z twice with an
+    engine tick after each: the post-undo regeneration must not leak into the older step as a 'hand edit'."""
+    bpy.ops.ed.undo_push(message="start")
+    rect = _add_u("RECT", width=200, height=100, x=0, y=0)
+    name = rect.name
+    other = _add_u("ELLIPSE", width=120, height=120, x=80, y=30)
+    flush()
+    bpy.data.objects[name].seam.shape.width = 260.0
+    bpy.ops.ed.undo_push(message="Width")          # the UI pushes when the value is committed ...
+    flush()                                        # ... the engine timer regenerates afterwards
+    assert _curve_width(bpy.data.objects[name]) == pytest.approx(260.0, abs=1e-3)
+    if next_op == "add":
+        _add_u("RECT", width=10, height=10, x=500, y=0)
+    else:
+        bpy.data.objects[other.name].location.x += 50
+        bpy.ops.ed.undo_push(message="Move")
+    flush()
+    assert bpy.ops.ed.undo() == {"FINISHED"}
+    flush()                                        # engine tick after the first Ctrl+Z
+    ob = bpy.data.objects[name]
+    assert ob.seam.shape.kind == "RECT" and ob.seam.shape.width == pytest.approx(260.0)
+    assert bpy.ops.ed.undo() == {"FINISHED"}
+    res = flush()
+    ob = bpy.data.objects[name]
+    assert not any("expanded" in r.message for r in res), [(r.key, r.message) for r in res]
+    assert ob.seam.shape.kind == "RECT" and ob.seam.shape.width == pytest.approx(200.0)
+    assert _curve_width(ob) == pytest.approx(200.0, abs=1e-3)
+    assert bpy.ops.ed.redo() == {"FINISHED"}
+    flush()
+    ob = bpy.data.objects[name]
+    assert ob.seam.shape.kind == "RECT" and _curve_width(ob) == pytest.approx(260.0, abs=1e-3)
+
+
+def test_generation_signature_lives_on_the_curve(doc):
+    ob = _add("RECT", width=100, height=50, x=0, y=0)
+    flush()
+    assert ob.data.get("_seam_sig_shape") and "_seam_sig_shape" not in ob.keys()
+    # a legacy file (signature on the object) still validates: no spurious expand
+    sig = ob.data["_seam_sig_shape"]
+    del ob.data["_seam_sig_shape"]
+    ob["_seam_sig_shape"] = sig
+    from seam_studio.engine import core
+    core.request_revalidate()
+    res = flush()
+    assert ob.seam.shape.kind == "RECT", [(r.key, r.message) for r in res]

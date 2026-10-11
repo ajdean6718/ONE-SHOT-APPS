@@ -70,7 +70,9 @@ def refresh_link_signature(scene, obj) -> None:
     from . import producer
     for link in scene.seam.links:
         if link.target == obj and link.state in ("LIVE", "PAUSED", "ERROR") and link.recipe != "DECAL":
-            link.target_data_signature = producer.read_data_signature(obj.data)
+            sig = producer.read_data_signature(obj.data)
+            link.target_data_signature = sig
+            obj.data[producer.MESH_DATA_SIG_PROP] = sig
 
 
 # ------------------------------------------------------------------ image / materials

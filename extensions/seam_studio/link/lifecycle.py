@@ -6,7 +6,9 @@ Runs at the start of every depsgraph update (``engine.add_update_hook``):
   (``source_id`` is kept so the link can re-point when the source comes back);
 * deleted target  -> the link record is removed;
 * objects sharing a SEAM id (duplicates) -> every copy gets a fresh id; a duplicated RESULT that
-  no link targets becomes an ordinary independent object (role NONE, own mesh);
+  no link targets becomes an ordinary independent object (role NONE, own mesh, own copies of the
+  link-owned materials and decal image, so it never follows the source again). "Targeted" is judged
+  over the links of **every** scene: a result linked into a second scene keeps its role and owner;
 * a link whose source pointer is None but whose ``source_id`` is in the scene (e.g. restored by
   undo or append) re-points to it and rebuilds.
 
@@ -104,10 +106,20 @@ def _pick_original(obs, referenced):
     return sorted(obs, key=lambda o: (len(o.name), o.name))[0]
 
 
+def all_links():
+    """Link records of every scene (a result object can be shown in several scenes)."""
+    out = []
+    for sc in bpy.data.scenes:
+        seam = getattr(sc, "seam", None)
+        if seam is not None:
+            out.extend(seam.links)
+    return out
+
+
 def dedupe_ids(scene) -> bool:
     """Give duplicated objects fresh SEAM ids; orphaned RESULT copies become independent."""
     groups = ids.duplicate_groups(scene.objects)
-    links = scene.seam.links
+    links = all_links()
     targets = {lk.target.as_pointer() for lk in links if lk.target is not None}
     referenced = targets | {lk.source.as_pointer() for lk in links if lk.source is not None}
     changed = False
@@ -118,19 +130,35 @@ def dedupe_ids(scene) -> bool:
                 continue
             ob.seam.id = new_id()
             changed = True
+    # a link whose target pointer was released keeps its target_id (check_links re-points it): not an orphan
+    pending_ids = {lk.target_id for lk in links if lk.target is None and lk.target_id}
     for ob in scene.objects:
-        if ob.seam.role == "RESULT" and ob.as_pointer() not in targets:
+        if ob.seam.role == "RESULT" and ob.as_pointer() not in targets and ob.seam.id not in pending_ids:
             make_independent(ob, links)
             changed = True
     return changed
 
 
 def make_independent(ob, links) -> None:
+    """Turn a copied RESULT into an ordinary object that no link will ever write or recolour."""
     ob.seam.role = "NONE"
     ob.seam.owner_id = ""
     me = ob.data
-    if me is not None and any(lk.target is not None and lk.target.data == me for lk in links):
-        ob.data = me.copy()  # never let a live link rewrite the copy's mesh
+    if me is None:
+        return
+    if any(lk.target is not None and lk.target.data == me for lk in links):
+        ob.data = me = me.copy()  # never let a live link rewrite the copy's mesh
+    for key in (producer.MESH_SIG_PROP, producer.MESH_DATA_SIG_PROP):
+        if key in me.keys():
+            del me[key]
+    for i, mat in enumerate(me.materials):
+        if mat is None or not mat.get("seam_link_id"):
+            continue
+        m2 = mat.copy()  # link-owned colours / decal image: the copy gets its own
+        m2["seam_link_id"] = ""
+        if mat.get("seam_material_role") == decal.ROLE:
+            decal.freeze_material_image(m2)
+        me.materials[i] = m2
 
 
 def on_update(scene, depsgraph=None) -> None:
@@ -271,16 +299,40 @@ def _on_save_pre(*_args):
         traceback.print_exc()
 
 
+def _seed_after_load() -> None:
+    for sc in bpy.data.scenes:
+        decal.seed_after_load(sc)
+
+
 @bpy.app.handlers.persistent
 def _on_load(*_args):
     _object_counts.clear()
     decal._applied.clear()
     try:
-        for sc in bpy.data.scenes:
-            decal.seed_after_load(sc)
+        _seed_after_load()
         subscribe_selection_sync()
     except Exception:
         traceback.print_exc()
+
+
+def revalidate_open_file() -> bool:
+    """The add-on was (re-)enabled with a file already open: no load_post fires, so ask the engine to re-check every
+    key on its next flush (sources may have been edited while SEAM was disabled) and seed what a load would seed.
+
+    ``bpy.data`` is restricted while ``addon_utils.enable`` runs ``register()`` (Blender 4.x) and at startup; the
+    revalidation request needs no data access, and without the seeding every vector decal simply re-renders once.
+    Returns True when the seeding ran too."""
+    _object_counts.clear()
+    decal._applied.clear()
+    engine.request_revalidate()
+    try:
+        _seed_after_load()
+    except AttributeError:  # _RestrictData: no bpy.data.scenes during registration
+        return False
+    except Exception:
+        traceback.print_exc()
+        return False
+    return True
 
 
 @bpy.app.handlers.persistent
@@ -308,6 +360,7 @@ def register():
         if _on_undo_redo not in lst:
             lst.append(_on_undo_redo)
     subscribe_selection_sync()
+    revalidate_open_file()
 
 
 def unregister():

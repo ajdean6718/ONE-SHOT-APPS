@@ -21,7 +21,10 @@ Source -> image
       background). Rebuilds rewrite the pixels of the *same* datablock (``Image.scale`` when the size changes). The longer side is
       capped at ``MAX_RENDER_SIDE`` (4096 px; the renderer works on a float64 canvas) and the link message says so.
     * RASTER: the raster document composite (``doc.composite``, kept current by the paint producer) is shared
-      directly, so pixel edits show without any rebuild; ``decal_resolution`` is ignored.
+      directly, so pixel edits show without any rebuild; ``decal_resolution`` is ignored. Bake (detach) and
+      Remove Link give the kept result a frozen, packed copy (:func:`bake_image`), so it stops following the
+      document and survives a resize or delete of it; :func:`freeze_raster_users` does the same for links that
+      still share a composite the paint module is about to remove.
 
 Staleness and undo
     Memfile undo restores properties but not pixels written from Python. The pixels of a vector decal are
@@ -361,6 +364,85 @@ def ensure_image(link, w: int, h: int):
     if not img.name.startswith(want[:MAX_NAME - 4]):
         img.name = want
     return img
+
+
+def frozen_copy(img, name: Optional[str] = None):
+    """An independent, packed 8-bit copy of ``img`` (same size, colour space and pixels). Baked results use it so they
+    stop following (and cannot lose) an image someone else owns, e.g. a raster document composite."""
+    w, h = int(img.size[0]), int(img.size[1])
+    new = bpy.data.images.new((name or (img.name + " (baked)"))[:63], max(1, w), max(1, h), alpha=True,
+                              float_buffer=False)
+    new.alpha_mode = img.alpha_mode
+    try:
+        new.colorspace_settings.name = img.colorspace_settings.name
+    except TypeError:
+        pass
+    if w and h:
+        buf = np.empty(w * h * 4, dtype=np.float32)
+        img.pixels.foreach_get(buf)
+        new.pixels.foreach_set(buf)
+        new.update()
+    try:
+        new.pack()
+    except RuntimeError:
+        pass
+    return new
+
+
+def freeze_material_image(mat):
+    """Give a (copied) decal material its own frozen image; returns the new image or None."""
+    node = mat.node_tree.nodes.get(IMAGE_NODE) if mat is not None and mat.node_tree is not None else None
+    if node is None or node.image is None:
+        return None
+    node.image = frozen_copy(node.image)
+    return node.image
+
+
+def bake_image(link) -> bool:
+    """Detach / remove: a decal that shares an image it does not own (raster composite) gets a frozen copy, and its
+    own vector image is packed (it is no longer re-rendered). Returns True when the material now uses a copy."""
+    img = link.decal_image
+    if link.recipe != "DECAL" or img is None:
+        return False
+    if img.get(IMAGE_PROP) == link.id:
+        try:
+            if img.packed_file is None or img.is_dirty:
+                img.pack()
+        except RuntimeError:
+            pass
+        return False
+    copy = frozen_copy(img, "SEAM Decal " + (link.source.name if link.source is not None else link.name))
+    copy[IMAGE_PROP] = link.id
+    for _i, mat in owned_slots(link):
+        sync_image_node(mat, copy)
+    link.decal_image = copy
+    return True
+
+
+FOLLOWING_STATES = ("LIVE", "ERROR")
+
+
+def freeze_raster_users(image, removing_source: bool = True) -> int:
+    """Before a raster document removes its composite ``image``, give the decals that show it a frozen copy so they
+    keep their picture. ``removing_source=True`` (the document is deleted: its links become MISSING_SOURCE, which
+    keeps the result) freezes every user; ``False`` (the composite is only replaced, e.g. a canvas resize) freezes
+    only links that do not follow the document right now (paused / conflict / ...); following links re-point to
+    the new composite on their next build. Returns the number of links frozen.
+
+    The paint module calls it right before ``bpy.data.images.remove(doc.composite)`` (remove_doc, resize_canvas)."""
+    if image is None:
+        return 0
+    n = 0
+    for sc in bpy.data.scenes:
+        seam = getattr(sc, "seam", None)
+        for link in (seam.links if seam is not None else ()):
+            if link.recipe != "DECAL" or link.decal_image != image:
+                continue
+            if not removing_source and link.state in FOLLOWING_STATES:
+                continue
+            if bake_image(link):
+                n += 1
+    return n
 
 
 def share_raster_image(scene, link):
