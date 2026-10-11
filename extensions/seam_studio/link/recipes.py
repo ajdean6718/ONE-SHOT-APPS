@@ -207,14 +207,14 @@ def validate_rings(rings, check_self_intersection: bool = True) -> List[str]:
         if len(ring) < 3:
             problems.append("path %d has fewer than 3 points" % (k + 1))
             continue
-        span = float(np.ptp(np.asarray(ring, dtype=np.float64), axis=0).max())
-        if abs(_signed_area(ring)) <= 1e-9 * max(span, 1e-9) ** 2:
-            problems.append("path %d encloses no area" % (k + 1))
-            continue
         if check_self_intersection:
             hit = _ring_self_intersects(ring)
             if hit is not None:
                 problems.append(_issue_text("path %d crosses itself" % (k + 1), hit))
+                continue
+        span = float(np.ptp(np.asarray(ring, dtype=np.float64), axis=0).max())
+        if abs(_signed_area(ring)) <= 1e-9 * max(span, 1e-9) ** 2:
+            problems.append("path %d encloses no area" % (k + 1))
     return problems
 
 
