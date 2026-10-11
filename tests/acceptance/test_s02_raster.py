@@ -343,3 +343,27 @@ def test_save_and_reopen_keep_layers_editable(seam, engine, tmp_path, blend_path
     save_and_reopen(blend_path)
     flush()
     assert (composite(tmp_path, "re2.png") == ref).all()
+
+
+def test_first_mask_edit_after_reopen_is_undoable(seam, engine, tmp_path, blend_path):
+    """Regression (same cause as the layer case): mask pixels edited right after opening a file could not be undone."""
+    new_doc("WHITE")
+    op(bpy.ops.seam.raster_fill, color=RED)
+    op(bpy.ops.seam.raster_mask_add, fill="WHITE")
+    op(bpy.ops.seam.raster_set_paint_target, target="MASK")
+    fill_rect(0, 0, 16, H, BLACK)
+    flush()
+    ref = composite(tmp_path, "ref.png")
+    assert (ref[:, :16] == 255).all() and at(ref, 40, 10) == (255, 0, 0, 255)
+    save_and_reopen(blend_path)
+    flush()
+    start_session()
+    assert doc().edit_target == "MASK"
+    op(bpy.ops.seam.raster_select_rect, x0=48, y0=0, x1=64, y1=H)
+    op(bpy.ops.seam.raster_fill, color=BLACK)
+    flush()
+    assert (composite(tmp_path, "edited.png")[:, 48:] == 255).all()
+    undo(2)
+    assert np.array_equal(composite(tmp_path, "undone.png"), ref)
+    redo(2)
+    assert (composite(tmp_path, "redone.png")[:, 48:] == 255).all()
