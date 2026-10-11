@@ -12,6 +12,8 @@ BLEND_MODE_ITEMS = [(m, m.replace("_", " ").title(), "") for m in R.BLEND_MODES]
 def _tag_raster(self, context):
     from ..engine import core as engine
     engine.request_revalidate()
+    from . import ops
+    ops.note_property_edit(self)  # paint mode: schedules the undo step the widget itself cannot record
 
 
 class SEAM_PG_RasterLayer(bpy.types.PropertyGroup):
@@ -21,7 +23,7 @@ class SEAM_PG_RasterLayer(bpy.types.PropertyGroup):
     opacity: FloatProperty(name="Opacity", min=0.0, max=1.0, default=1.0, subtype="FACTOR", update=_tag_raster)
     blend_mode: EnumProperty(name="Blend", items=BLEND_MODE_ITEMS, default="NORMAL", update=_tag_raster)
     visible: BoolProperty(name="Visible", default=True, update=_tag_raster)
-    locked: BoolProperty(name="Locked", default=False)
+    locked: BoolProperty(name="Locked", default=False, update=_tag_raster)
     mask: PointerProperty(name="Mask", type=bpy.types.Image)
     mask_enabled: BoolProperty(name="Use Mask", default=True, update=_tag_raster)
     rev: IntProperty(name="Pixel Revision", default=0, description="Revision of the layer pixels written by SEAM (undo journal key)")

@@ -207,6 +207,9 @@ def _new_image(name: str, w: int, h: int, colorspace: str, fill=(0, 0, 0, 0)):
     img.colorspace_settings.name = colorspace
     img.use_fake_user = True
     img["seam_raster"] = 1  # marker: images owned by the paint module (orphans are purged on save)
+    # a blank image that was never packed (auto save, crash recovery) is regenerated from this colour on load;
+    # the default is opaque black, which would turn every transparent layer into a black one
+    img.generated_color = tuple(float(v) for v in fill)
     buf = np.empty(int(w) * int(h) * 4, np.float32)
     buf.reshape(-1, 4)[:] = np.asarray(fill, np.float32)
     img.pixels.foreach_set(buf)
@@ -302,6 +305,7 @@ def write_mask_array(layer, mask: np.ndarray, touch: bool = True) -> None:
 JOURNAL_LIMIT_BYTES = 384 * 1024 * 1024
 _journal: "OrderedDict[Tuple[str, str, int], Tuple[int, int, bytes]]" = OrderedDict()
 _journal_bytes = 0
+_evicted: set = set()   # journal keys dropped by the memory cap (tells "evicted" apart from "never recorded")
 _applied: Dict[Tuple[str, str], int] = {}   # (owner id, kind) -> revision of the pixels held by the image
 _REV_ATTR = {"img": "rev", "mask": "mask_rev", "sel": "sel_rev"}
 
@@ -320,8 +324,9 @@ def _journal_put(key, a8: np.ndarray) -> None:
     _journal[key] = (a8.shape[1], a8.shape[0], blob)
     _journal_bytes += len(blob)
     while _journal_bytes > JOURNAL_LIMIT_BYTES and len(_journal) > 1:
-        _k, v = _journal.popitem(last=False)
+        k, v = _journal.popitem(last=False)
         _journal_bytes -= len(v[2])
+        _evicted.add(k)
 
 
 def _journal_get(key) -> Optional[np.ndarray]:
@@ -335,6 +340,7 @@ def _journal_get(key) -> Optional[np.ndarray]:
 def journal_clear() -> None:
     global _journal_bytes
     _journal.clear()
+    _evicted.clear()
     _journal_bytes = 0
 
 
@@ -345,20 +351,32 @@ def commit_pixels(holder, kind: str, a8: np.ndarray) -> int:
     setattr(holder, attr, rev)
     _journal_put((holder.id, kind, rev), a8)
     _applied[(holder.id, kind)] = rev
+    if _load_lost:  # SEAM wrote the pixels again: they are no longer missing
+        try:
+            _load_lost.remove(f"{holder.id}:{kind}")
+        except ValueError:
+            pass
     return rev
 
 
 def ensure_baseline(holder, kind: str) -> None:
-    """Journal the pixels the image holds *before* a SEAM write replaces them, when no entry exists for the current
-    revision.  After a file load the journal is empty, so without this the first edit of a session could not be
-    undone (the pre-edit revision had no snapshot to swap back in)."""
+    """Journal the pixels the image holds *right now* under the current revision, before a SEAM write replaces them.
+
+    Native brush strokes never bump the revision, so the journal entry of the current revision (the pixels SEAM last
+    wrote, or nothing after a file load) can be older than the image: undoing the next SEAM write must bring back
+    the pixels as they were just before it, strokes included.  The entry is therefore refreshed whenever it differs
+    from the image.  Nothing is journaled when the image is known to hold a different revision (its entry was
+    evicted): filing those pixels under the wrong revision would fabricate history."""
     attr = _REV_ATTR[kind]
     rev = int(getattr(holder, attr))
-    if (holder.id, kind, rev) in _journal:
-        return
     img = _holder_image(holder, kind)
-    if img is not None and _applied.get((holder.id, kind), rev) == rev:
-        _journal_put((holder.id, kind, rev), read_image_srgb8(img))
+    if img is None or _applied.get((holder.id, kind), rev) != rev:
+        return
+    cur = read_image_srgb8(img)
+    key = (holder.id, kind, rev)
+    old = _journal_get(key) if key in _journal else None
+    if old is None or old.shape != cur.shape or not np.array_equal(old, cur):
+        _journal_put(key, cur)
 
 
 def snapshot_current(holder, kind: str) -> None:
@@ -397,27 +415,42 @@ def _pixel_holders():
 def _content_rev(img, key, rev: int) -> Optional[int]:
     """Revision of the pixels an image holds right now, or None when it holds nothing meaningful.
 
-    Live (dirty) buffers are SEAM's own writes (``_applied``); a clean packed image holds what was packed
-    (recorded in ``seam_packed_rev``, which undo restores together with the packed data); a clean unpacked image is
-    a freshly re-created, blank datablock (memfile undo re-reads images whose datablock differs between steps)."""
+    Live (dirty) buffers are SEAM's own writes plus native strokes (``_applied``).  A clean packed image holds what
+    was packed (recorded in ``seam_packed_rev`` / ``seam_packed_crc``, which undo restores together with the packed
+    data) - but only when the in-memory buffer really is that data: memfile undo restores the packed file and the
+    ID properties of an image and may keep the pixel buffer it had before (measured on 4.0.2 and 5.2.2), so the
+    buffer is compared with the recorded CRC and, when it differs, is the revision SEAM last put there.  A clean
+    unpacked image is a freshly re-created, blank datablock (memfile undo re-reads images whose datablock differs
+    between steps)."""
     if img.is_dirty:
         # a live buffer without a record was only ever edited natively (strokes): it belongs to the current revision
         return _applied.get(key, rev)
     if img.packed_file is not None:
         v = img.get("seam_packed_rev")
-        return None if v is None else int(v)
+        if v is None:
+            return None
+        crc = img.get("seam_packed_crc")
+        if crc is None or _fingerprint(img) == int(crc):
+            return int(v)
+        return _applied.get(key, rev)
     return None
 
 
-_restore_lost: List[str] = []  # holders whose pixels could not be restored by the last undo/redo (journal evicted)
+_restore_lost: List[str] = []  # holders whose pixels could not be restored by the last undo/redo
+_restore_evicted = False      # at least one of them was evicted by the memory cap (else: never recorded)
+_load_lost: List[str] = []    # holders whose pixels are missing from a loaded file (e.g. recovered from an auto save)
 
 
 def pixel_restore_warning() -> str:
-    """Non-empty when the last undo/redo could not restore some pixels because the journal memory cap evicted them."""
+    """Non-empty when the last undo/redo or file load could not restore some pixels (the pixels that are there stay)."""
+    if _load_lost:
+        return (f"{len(_load_lost)} raster image(s) came back without pixels (the file was written without them, "
+                "e.g. recovered from an auto save made before they were packed)")
     if not _restore_lost:
         return ""
-    return (f"Undo restored the settings but not the pixels of {len(_restore_lost)} image(s): "
-            "the undo history memory limit was reached")
+    why = ("the undo history memory limit was reached" if _restore_evicted
+           else "no history was recorded for them (history does not survive reopening a file)")
+    return f"Undo restored the settings but not the pixels of {len(_restore_lost)} image(s): {why}"
 
 
 def restore_pixels_after_undo() -> int:
@@ -425,8 +458,10 @@ def restore_pixels_after_undo() -> int:
 
     Pixels whose journal entry was evicted (memory cap) stay as they are; that is recorded in
     :func:`pixel_restore_warning` (shown in the Raster Document panel) instead of failing silently."""
+    global _restore_evicted
     n = 0
     _restore_lost.clear()
+    _restore_evicted = False
     holders = list(_pixel_holders())
     present = {(h.id, k) for _d, h, k in holders}
     for k in [k for k in _applied if k not in present]:
@@ -443,6 +478,11 @@ def restore_pixels_after_undo() -> int:
         if a8 is None:
             if rev != 0:
                 print(f"SEAM: no journal entry for {kind} revision {rev} of {holder.id}; pixels left as they are")
+                _restore_lost.append(f"{holder.id}:{kind}")
+                _restore_evicted = _restore_evicted or (holder.id, kind, rev) in _evicted
+                _applied[key] = rev
+                continue
+            if img.packed_file is not None:  # real pixels of unknown revision: never overwrite what SEAM did not write
                 _restore_lost.append(f"{holder.id}:{kind}")
                 _applied[key] = rev
                 continue
@@ -904,6 +944,92 @@ def remove_doc(scene, doc) -> None:
     _cache_sigs.pop(f"rastercache:{rid}", None)
     n = len(scene.seam.rasters)
     scene.seam.active_raster_index = max(0, min(scene.seam.active_raster_index, n - 1))
+
+
+def duplicate_doc(scene, src, canvas_obj, name: Optional[str] = None):
+    """Independent copy of raster document ``src`` bound to ``canvas_obj`` (layers, masks, properties; not the
+    selection).  The canvas object keeps its place; it gets its own mesh and material.  Returns the new document."""
+    src_id = src.id
+    w, h = doc_size(src)
+    name = _unique_doc_name(scene, name or canvas_obj.name)
+    rs = scene.seam.rasters
+    n = len(rs)
+    item = rs.add()
+    item.id = new_id()
+    item.name = name
+    item.width, item.height = w, h
+    doc = scene.seam.rasters[n]
+    src = get_doc(scene, src_id)  # the collection grew: earlier handles may be stale
+    doc.background = src.background
+    doc.background_color = tuple(src.background_color)
+    for i, sl in enumerate(src.layers):
+        a8 = read_image_srgb8(layer_image(sl))
+        img = _new_image(_layer_image_name(doc, sl.name), w, h, "sRGB")
+        write_image_srgb8(img, a8)
+        mask_img, m8 = None, None
+        if sl.mask is not None:
+            m8 = read_image_srgb8(sl.mask)
+            mask_img = _new_image(_layer_image_name(doc, sl.name, "mask"), w, h, "Non-Color", (1, 1, 1, 1))
+            write_image_srgb8(mask_img, m8)
+        k = _append_layer(doc, sl.name, image=img)
+        new = doc.layers[k]
+        new.opacity, new.blend_mode, new.visible, new.locked, new.mask_enabled = (
+            sl.opacity, sl.blend_mode, sl.visible, sl.locked, sl.mask_enabled)
+        new.mask = mask_img
+        commit_pixels(new, "img", a8)
+        if mask_img is not None:
+            commit_pixels(new, "mask", m8)
+        src = get_doc(scene, src_id)
+        doc = scene.seam.rasters[n]
+    doc.active_layer_index = max(0, min(src.active_layer_index, len(doc.layers) - 1))
+    # own mesh (Alt+D shares it) and own material
+    if canvas_obj.data.users > 1:
+        canvas_obj.data = canvas_obj.data.copy()
+    me = canvas_obj.data
+    old_ma = src.material
+    ma = bpy.data.materials.new(_image_name(name, "material"))
+    swapped = False
+    for i, slot_ma in enumerate(me.materials):
+        if slot_ma is None or slot_ma == old_ma:
+            me.materials[i] = ma
+            swapped = True
+    if not swapped:
+        me.materials.append(ma)
+    doc.material = ma
+    canvas_obj.seam.raster_id = doc.id
+    doc.canvas = canvas_obj
+    build_material(doc)
+    engine.mark_dirty(f"rastercache:{doc.id}")
+    return scene.seam.rasters[n]
+
+
+def adopt_duplicated_canvases(scene, depsgraph=None) -> int:
+    """Engine update hook: a RASTER canvas object that was copied (Shift+D, Alt+D, copy/paste) names the document of
+    the original in ``seam.raster_id``.  Two objects must never share one document (painting on one would change
+    the other and deleting one would orphan the other), so the copy becomes an independent duplicate document."""
+    if not len(scene.seam.rasters):
+        return 0
+    if depsgraph is not None:
+        cands = []
+        for upd in depsgraph.updates:
+            idd = getattr(upd.id, "original", upd.id)
+            if isinstance(idd, bpy.types.Object):
+                cands.append(idd)
+    else:
+        cands = list(scene.objects)
+    n = 0
+    for ob in cands:
+        try:
+            if ob.seam.role != ROLE or not ob.seam.raster_id:
+                continue
+            doc = get_doc(scene, ob.seam.raster_id)
+            if doc is None or doc.canvas is None or doc.canvas == ob:
+                continue
+            duplicate_doc(scene, doc, ob)
+            n += 1
+        except ReferenceError:
+            continue
+    return n
 
 
 def ensure_canvas_object(doc):
@@ -1405,30 +1531,46 @@ class RasterCacheProducer(engine.Producer):
 
 # --------------------------------------------------------------------------- handlers
 
+def _pack_doc(doc, composite: bool = True, selection: bool = True) -> int:
+    items = []
+    if composite:
+        items.append((doc.composite, None, None))
+    if selection and doc.selection is not None:
+        items.append((doc.selection, doc, "sel"))
+    for ly in doc.layers:
+        items.append((ly.image, ly, "img"))
+        items.append((ly.mask, ly, "mask"))
+    n = 0
+    for img, holder, kind in items:
+        if img is None:
+            continue
+        try:
+            if img.packed_file is None or img.is_dirty:
+                img.pack()
+                if holder is not None:
+                    img["seam_packed_rev"] = int(getattr(holder, _REV_ATTR[kind]))
+                    img["seam_packed_crc"] = str(_fingerprint(img))  # ID props are 32-bit ints: store as text
+                n += 1
+        except Exception:
+            traceback.print_exc()
+    return n
+
+
 def pack_images(scene) -> int:
     """Pack every dirty/unpacked SEAM raster image (layers, masks, selection, composite). Returns the count.
 
     Packed layer/mask/selection images record the revision they hold in ``seam_packed_rev``."""
-    n = 0
-    for doc in scene.seam.rasters:
-        items = [(doc.composite, None, None)]
-        if doc.selection is not None:
-            items.append((doc.selection, doc, "sel"))
-        for ly in doc.layers:
-            items.append((ly.image, ly, "img"))
-            items.append((ly.mask, ly, "mask"))
-        for img, holder, kind in items:
-            if img is None:
-                continue
-            try:
-                if img.packed_file is None or img.is_dirty:
-                    img.pack()
-                    if holder is not None:
-                        img["seam_packed_rev"] = int(getattr(holder, _REV_ATTR[kind]))
-                    n += 1
-            except Exception:
-                traceback.print_exc()
-    return n
+    return sum(_pack_doc(doc) for doc in scene.seam.rasters)
+
+
+def pack_layer_images(doc) -> int:
+    """Pack the dirty/unpacked layer and mask images of ``doc`` (not the derived composite or the selection).
+
+    Generated images carry no pixels in a ``.blend`` unless packed, and Blender's auto save / quit.blend /
+    Recover Last Session write the last undo (memfile) step *without* running ``save_pre``.  SEAM therefore packs
+    right before it pushes an undo step for a pixel edit, and when a paint session has been idle, so the memfile
+    that auto save writes holds the pixels.  Returns the number of images packed."""
+    return _pack_doc(doc, composite=False, selection=False)
 
 
 def purge_orphan_images() -> int:
@@ -1482,12 +1624,31 @@ def _on_undo_redo(*_args):
         traceback.print_exc()
 
 
+def _detect_lost_pixels() -> None:
+    """After a file load: images that were written without pixels (auto save of a memfile made before they were
+    packed) come back as blank generated images although their revision says SEAM wrote something.  Report them
+    instead of trusting the revision; a selection without pixels is dropped (a blank selection would block
+    painting everywhere)."""
+    _load_lost.clear()
+    for doc, holder, kind in _pixel_holders():
+        img = _holder_image(holder, kind)
+        if img is None or img.packed_file is not None or int(getattr(holder, _REV_ATTR[kind])) <= 0:
+            continue
+        if img.source != "GENERATED":
+            continue  # linked from a file on disk: Blender loads the pixels itself
+        _load_lost.append(f"{holder.id}:{kind}")
+        print(f"SEAM: the file holds no pixels for {kind} revision {getattr(holder, _REV_ATTR[kind])} of {holder.id}")
+        if kind == "sel":
+            doc.has_selection = False
+
+
 @persistent
 def _on_load_post(*_args):
     try:
         journal_clear()
         _restore_lost.clear()
         mark_pixels_applied()
+        _detect_lost_pixels()
         _after_history_jump()
     except Exception:
         traceback.print_exc()
@@ -1503,9 +1664,14 @@ _WATCH_MIN = 0.4
 _watching = set()  # doc ids whose canvas is (or was just) in Texture Paint mode
 
 
+PACK_IDLE = 2.0       # seconds without a detected stroke before the painted images are packed
+_pack_due: Dict[str, float] = {}  # doc id -> monotonic time at which the idle pack is due
+
+
 def _watch_tick():
     """Timer: while a SEAM canvas is in Texture Paint mode, detect native strokes and keep the paint target synced;
-    when the mode was left, show the composite again."""
+    when the mode was left, show the composite again.  Painted images are packed once the painting pauses, so the
+    memfile that auto save writes holds the strokes."""
     import time
     t0 = time.perf_counter()
     for sc in _scenes():
@@ -1518,10 +1684,17 @@ def _watch_tick():
                     sync_paint_target(doc)
                     img = target_image(doc)
                     if img is not None and img != doc.sink and img.is_dirty:
-                        check_external_edits(doc, [img])
+                        if check_external_edits(doc, [img]):
+                            _pack_due[doc.id] = t0 + PACK_IDLE
+                    due = _pack_due.get(doc.id)
+                    if due is not None and t0 >= due:
+                        del _pack_due[doc.id]
+                        pack_layer_images(doc)
                 else:
                     _watching.discard(doc.id)
+                    _pack_due.pop(doc.id, None)
                     sync_paint_target(doc)
+                    pack_layer_images(doc)
             except Exception:
                 traceback.print_exc()
                 _watching.discard(doc.id)
@@ -1682,6 +1855,7 @@ classes = ()
 def register():
     engine.register_producer(RasterMaterialProducer())
     engine.register_producer(RasterCacheProducer())
+    engine.add_update_hook(adopt_duplicated_canvases)
     for name, fn in _HANDLERS:
         lst = getattr(bpy.app.handlers, name)
         if fn not in lst:
@@ -1691,6 +1865,7 @@ def register():
 def unregister():
     engine.unregister_producer("rastermat")
     engine.unregister_producer("rastercache")
+    engine.remove_update_hook(adopt_duplicated_canvases)
     for name, fn in _HANDLERS:
         lst = getattr(bpy.app.handlers, name)
         while fn in lst:
@@ -1704,5 +1879,6 @@ def unregister():
     _fingerprints.clear()
     _cache_sigs.clear()
     _watching.clear()
+    _pack_due.clear()
     _applied.clear()
     journal_clear()
