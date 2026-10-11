@@ -54,3 +54,12 @@ Link update latency (from link worker, under load avg ~4.5): 4-pt square 1.4 ms 
 Integration defects found at merge: gui_draw_rect held a Scene reference across memfile undo (test bug) — fixed e36cd93.
 Integrated build after wave-2 merges (b3d40e7): unit 485 (py3.13) / 453+1 skip (py3.12); integration 515+1 skip (5.2.2 LTS), 514+2 skip (4.0.2);
 GUI 5/5 scenarios (4.0.2 under Xvfb). Template rebuild 47 s; demos 3/3 built.
+
+### Usage-limit interruption (≈02:50–03:10 UTC)
+The account session limit was reached ("resets 04:20 UTC"): the gui implementation agent, the acceptance fix stage,
+2 of 4 review lenses (fidelity, robustness) and all 13 verification agents of the integrated review failed.
+Preserved: gui WIP committed (4e71861); acceptance implementation+review merged (ce8fbea; its partial fix edits stashed);
+13 unverified review findings saved to docs/tasks/review-findings-r1.json. On the user's "Try again" (03:08 UTC) work resumed as
+wave 3: fix-paint (Sonnet), fix-linkvec (Opus — undo/data-integrity), gui continuation (Sonnet). Each fix worker must
+reproduce a finding before fixing it (verification folded into the fix stage to save usage).
+Integrated build at ce8fbea: integration 515+1 skip (5.2.2) / 514+2 skip (4.0.2); acceptance 92 passed + 2 strict xfail (both runtimes).
