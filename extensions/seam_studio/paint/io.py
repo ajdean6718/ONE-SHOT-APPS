@@ -13,7 +13,7 @@ from bpy.props import EnumProperty, StringProperty
 
 from ..seam_core import png
 from ..seam_core import raster as R
-from .ops import _undoable_in_paint_mode
+from .undo import undoable_in_paint_mode as _undoable_in_paint_mode
 from . import rasterdoc as rd
 
 PLACEMENT_ITEMS = [

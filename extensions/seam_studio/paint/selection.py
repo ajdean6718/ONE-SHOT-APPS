@@ -17,6 +17,7 @@ from mathutils import Vector
 
 from ..seam_core import raster as R
 from . import rasterdoc as rd
+from .undo import undoable_in_paint_mode
 
 SELECTION_OP_ITEMS = [(m, m.title(), d) for m, d in (
     ("REPLACE", "Replace the selection"), ("ADD", "Add to the selection"),
@@ -348,6 +349,7 @@ class SEAM_OT_raster_select_rect(_DragSelect, bpy.types.Operator):
         self.x1, self.y1 = self._p1
         return self.execute(context)
 
+    @undoable_in_paint_mode
     def execute(self, context):
         doc = self._doc(context)
         select_rect(doc, self.x0, self.y0, self.x1, self.y1, self.mode, self.antialias)
@@ -369,6 +371,7 @@ class SEAM_OT_raster_select_ellipse(_DragSelect, bpy.types.Operator):
         self.x1, self.y1 = self._p1
         return self.execute(context)
 
+    @undoable_in_paint_mode
     def execute(self, context):
         doc = self._doc(context)
         select_ellipse(doc, self.x0, self.y0, self.x1, self.y1, self.mode, self.antialias)
@@ -390,6 +393,7 @@ class SEAM_OT_raster_select_lasso(_DragSelect, bpy.types.Operator):
             item.loc = p
         return self.execute(context)
 
+    @undoable_in_paint_mode
     def execute(self, context):
         doc = self._doc(context)
         pts = [(float(p.loc[0]), float(p.loc[1])) for p in self.path]
@@ -410,6 +414,7 @@ class SEAM_OT_raster_select_all(bpy.types.Operator):
     def poll(cls, context):
         return _doc_poll(cls, context)
 
+    @undoable_in_paint_mode
     def execute(self, context):
         select_all(rd.active_doc(context.scene))
         return {"FINISHED"}
@@ -425,6 +430,7 @@ class SEAM_OT_raster_select_none(bpy.types.Operator):
     def poll(cls, context):
         return _doc_poll(cls, context, need_selection=True)
 
+    @undoable_in_paint_mode
     def execute(self, context):
         clear_selection(rd.active_doc(context.scene))
         return {"FINISHED"}
@@ -440,6 +446,7 @@ class SEAM_OT_raster_select_invert(bpy.types.Operator):
     def poll(cls, context):
         return _doc_poll(cls, context, need_selection=True)
 
+    @undoable_in_paint_mode
     def execute(self, context):
         invert_selection(rd.active_doc(context.scene))
         return {"FINISHED"}

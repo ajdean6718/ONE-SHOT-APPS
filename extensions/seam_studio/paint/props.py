@@ -12,8 +12,8 @@ BLEND_MODE_ITEMS = [(m, m.replace("_", " ").title(), "") for m in R.BLEND_MODES]
 def _tag_raster(self, context):
     from ..engine import core as engine
     engine.request_revalidate()
-    from . import ops
-    ops.note_property_edit(self)  # paint mode: schedules the undo step the widget itself cannot record
+    from . import undo
+    undo.note_property_edit(self)  # paint mode: schedules the undo step the widget itself cannot record
 
 
 class SEAM_PG_RasterLayer(bpy.types.PropertyGroup):
