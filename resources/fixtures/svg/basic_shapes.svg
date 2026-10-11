@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SEAM test fixture (original). Basic shapes, units, style attribute, transforms. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 200 100">
+  <title>Basic shapes</title>
+  <rect id="box" x="10" y="10" width="40" height="20" fill="#336699" stroke="#000000" stroke-width="2"/>
+  <rect id="round" x="60" y="10" width="40" height="20" rx="5" fill="rgb(255,128,0)" fill-opacity="0.5"/>
+  <circle id="dot" cx="130" cy="20" r="10" style="fill:#00ff00;stroke:red;stroke-width:3;stroke-linecap:round;stroke-linejoin:bevel;opacity:0.75"/>
+  <ellipse id="oval" cx="170" cy="20" rx="15" ry="8" fill="blue"/>
+  <line id="rule" x1="10" y1="50" x2="90" y2="50" stroke="#808080" stroke-width="4" stroke-linecap="square"/>
+  <polyline id="zig" points="100,50 110,60 120,50 130,60" fill="none" stroke="black"/>
+  <polygon id="tri" points="150,50 180,50 165,70" fill="#abc" fill-rule="evenodd"/>
+  <g id="moved" transform="translate(20 70) scale(2)" fill="purple" stroke="black" stroke-width="1">
+    <path id="inner" d="M0 0 L10 0 L10 10 Z"/>
+  </g>
+</svg>
