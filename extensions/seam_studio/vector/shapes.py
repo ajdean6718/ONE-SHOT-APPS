@@ -201,7 +201,7 @@ class SEAM_OT_add_shape(bpy.types.Operator):
             self.report({"ERROR"}, "Shape kernels are not available in this build")
             return {"CANCELLED"}
         select_only(context, ob)
-        engine.flush(scene)
+        engine.flush(scene, evaluate=True)
         return {"FINISHED"}
 
 

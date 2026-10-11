@@ -531,8 +531,11 @@ def restack(scene=None) -> None:
 
 
 def canvas_point_to_world(scene, x: float, y: float) -> Vector:
+    """World position of canvas-local (x, y). Uses the root's basis matrix so it is valid right after creation."""
     from ..bridge import canvas_matrix
-    return canvas_matrix(scene) @ Vector((x, y, 0.0))
+    root = canvas_root(scene)
+    m = root.matrix_basis if root is not None and root.parent is None else canvas_matrix(scene)
+    return m @ Vector((x, y, 0.0))
 
 
 def canvas_bounds(obj, depsgraph=None, scene=None):
@@ -703,7 +706,13 @@ class SEAM_OT_canvas_new(bpy.types.Operator):
             scene.view_settings.view_transform = "Standard"
         except (TypeError, AttributeError):
             pass
-        engine.flush(scene)
+        set_active_layer(scene, active_layer(scene))  # native tools (pen, curve add) now land in a SEAM layer
+        if not had_artboard:  # new objects are added at the 3D cursor: put it on the artboard, not 20000 px away
+            ab = active_artboard(scene)
+            if ab is not None:
+                minx, miny, maxx, maxy = artboard_rect(ab)
+                scene.cursor.location = canvas_point_to_world(scene, (minx + maxx) * 0.5, (miny + maxy) * 0.5)
+        engine.flush(scene, evaluate=True)
         if not bpy.app.background and context.area is not None and context.area.type == "VIEW_3D":
             try:
                 bpy.ops.seam.view_artboard()
@@ -850,14 +859,10 @@ class SEAM_OT_view_artboard(bpy.types.Operator):
     bl_description = "Top orthographic view centred on the active artboard, fitted to the viewport"
     bl_options = {"REGISTER"}
 
-    @classmethod
-    def poll(cls, context):
-        if bpy.app.background:
-            cls.poll_message_set("Needs a 3D viewport (not available in background mode)")
-            return False
-        return True
-
     def execute(self, context):
+        if bpy.app.background:
+            self.report({"WARNING"}, "View framing needs a 3D viewport (background mode): nothing to do")
+            return {"CANCELLED"}
         scene = context.scene
         area, region, space = _find_view3d(context)
         if space is None:

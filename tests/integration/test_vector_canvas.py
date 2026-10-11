@@ -27,6 +27,10 @@ def test_canvas_new_is_idempotent_and_sets_standard_view(seam):
     assert (ab.seam.artboard.width, ab.seam.artboard.height) == (800, 600)
     assert scene.view_settings.view_transform == "Standard"
     assert scene.seam.doc.canvas_ready
+    # native tools land in the SEAM layer and at the artboard centre
+    assert canvas.active_layer(scene) == canvas.layers(scene)[0]
+    assert bpy.context.view_layer.active_layer_collection.collection == canvas.layers(scene)[0]
+    assert tuple(scene.cursor.location) == pytest.approx((400.0, -20000.0 - 300.0, 0.0))
     bpy.ops.seam.canvas_new(width=100, height=100)  # must not resize the existing artboard
     assert len(canvas.artboards(scene)) == 1
     assert canvas.active_artboard(scene).seam.artboard.width == 800
@@ -97,11 +101,9 @@ def test_artboard_survives_save_and_reload(seam, blend_path):
     assert _mesh_bounds(ab) == (0.0, -480.0, 640.0, 0.0)
 
 
-def test_view_artboard_is_disabled_in_background(seam):
+def test_view_artboard_is_a_reported_no_op_in_background(seam):
     assert bpy.app.background
-    assert not bpy.ops.seam.view_artboard.poll()
-    with pytest.raises(RuntimeError):
-        bpy.ops.seam.view_artboard()
+    assert bpy.ops.seam.view_artboard() == {"CANCELLED"}  # warns "needs a 3D viewport", never raises
 
 
 def test_layers_add_remove_move_active(seam):
@@ -231,3 +233,21 @@ def test_canvas_bounds_of_evaluated_geometry(seam):
     ob.scale.x = 2.0
     bpy.context.view_layer.update()
     assert canvas.canvas_bounds(ob) == pytest.approx((175, -200, 225, 0), abs=1e-3)
+
+
+def test_native_curve_add_lands_in_layer_and_is_adopted(seam):
+    canvas = _canvas()
+    scene = bpy.context.scene
+    bpy.ops.seam.canvas_new(width=800, height=600)
+    bpy.ops.curve.primitive_bezier_curve_add(location=tuple(scene.cursor.location))
+    ob = bpy.context.active_object
+    assert canvas.layers(scene)[0] in ob.users_collection
+    flush()
+    assert ob.seam.role == "SHAPE" and ob.parent.seam.role == "CANVAS_ROOT"
+    assert (ob.location.x, ob.location.y) == pytest.approx((400.0, -300.0), abs=1e-3)
+    assert ob.data.dimensions == "2D"
+    # Shift+D duplicate (native operator): ids are re-issued
+    bpy.ops.object.duplicate()
+    flush()
+    shapes = [o for o in scene.objects if o.seam.role == "SHAPE"]
+    assert len(shapes) == 2 and len({o.seam.id for o in shapes}) == 2

@@ -492,3 +492,27 @@ def test_text_object_gets_material_and_stroke(doc):
     ob.seam.style.fill_type = "LINEAR"
     flush()
     assert bpy.data.images.get("SEAM Gradient " + ob.seam.id) is not None
+
+
+def test_undo_redo_rebuilds_derived_data_from_restored_sources(doc):
+    _need_core(stroke=True)
+    ob = _rect(100, 100)
+    name = ob.name
+    bpy.ops.ed.undo_push(message="plain")
+    ob.seam.style.stroke_enabled = True
+    ob.seam.style.fill_color = (0.0, 1.0, 0.0, 1.0)
+    flush()
+    bpy.ops.ed.undo_push(message="styled")
+    assert _stroke_child(ob) is not None
+    bpy.ops.ed.undo()
+    flush()
+    ob = bpy.data.objects[name]
+    assert ob.seam.style.stroke_enabled is False and _stroke_child(ob) is None
+    assert not [o for o in bpy.data.objects if o.seam.role == "STROKE"]
+    assert _emission(_mat(ob))[:3] != pytest.approx((0.0, 1.0, 0.0))
+    bpy.ops.ed.redo()
+    flush()
+    ob = bpy.data.objects[name]
+    assert ob.seam.style.stroke_enabled is True and _stroke_child(ob) is not None
+    assert _emission(_mat(ob))[:3] == pytest.approx((0.0, 1.0, 0.0))
+    assert len([o for o in bpy.data.objects if o.seam.role == "STROKE"]) == 1

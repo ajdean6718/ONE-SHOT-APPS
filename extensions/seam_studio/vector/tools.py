@@ -116,7 +116,7 @@ class DrawSession:
     def finish(self, context):
         ob, self.obj = self.obj, None
         scene = context.scene
-        engine.flush(scene)
+        engine.flush(scene, evaluate=True)
         if ob is not None:
             if ob.seam.role == "ARTBOARD":
                 canvas.set_active_artboard(scene, ob)
