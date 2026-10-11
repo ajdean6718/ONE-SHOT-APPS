@@ -35,6 +35,12 @@ class SEAM_PG_DocSettings(bpy.types.PropertyGroup):
     canvas_ready: BoolProperty(default=False)
 
 
+def _tag_owner(self, context):
+    obj = getattr(self, "id_data", None)
+    if obj is not None and hasattr(obj, "update_tag"):
+        obj.update_tag()
+
+
 class SEAM_PG_Object(bpy.types.PropertyGroup):
     id: StringProperty(name="SEAM ID")
     role: EnumProperty(name="Role", items=ROLES, default="NONE")
@@ -43,7 +49,7 @@ class SEAM_PG_Object(bpy.types.PropertyGroup):
     style: PointerProperty(type=SEAM_PG_Style)
     shape: PointerProperty(type=SEAM_PG_ShapeRecipe)
     artboard: PointerProperty(type=SEAM_PG_Artboard)
-    clip_source: PointerProperty(name="Clip To", type=bpy.types.Object)
+    clip_source: PointerProperty(name="Clip To", type=bpy.types.Object, update=_tag_owner)
 
 
 class SEAM_PG_Scene(bpy.types.PropertyGroup):
