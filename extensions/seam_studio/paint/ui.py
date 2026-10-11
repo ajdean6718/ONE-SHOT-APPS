@@ -55,10 +55,12 @@ class SEAM_PT_paint_document(bpy.types.Panel):
         row.operator("seam.raster_resize_canvas", text="", icon="FULLSCREEN_ENTER")
         warn = rd.pixel_restore_warning()
         if warn:
+            import textwrap
             box = layout.box()
             box.alert = True
-            box.label(text="Undo could not restore all pixels", icon="ERROR")
-            box.label(text="(undo history memory limit reached)")
+            box.label(text="Some pixels could not be restored", icon="ERROR")
+            for line in textwrap.wrap(warn, 38):
+                box.label(text=line)
         layout.prop(doc, "background", text="Background")
         if doc.background == "COLOR":
             layout.prop(doc, "background_color", text="")

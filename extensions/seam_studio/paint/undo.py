@@ -28,6 +28,8 @@ def _enter_paint_mode(context, doc_id: str) -> None:
             break
     if cur is None or cur.canvas is None or cur.canvas.mode == "TEXTURE_PAINT":
         return
+    if context.view_layer.objects.active != cur.canvas:
+        return  # the selection changed meanwhile (undo, a click): never put another object into paint mode
     from . import selection
     try:
         context.tool_settings.image_paint.mode = "MATERIAL"
@@ -49,10 +51,13 @@ def _reenter_paint_later(doc_id: str) -> None:
         _enter_paint_mode(bpy.context, doc_id)
         return
 
+    tries = [0]
+
     def reenter():
         try:
             override, busy = _gui_override()
-            if busy:
+            tries[0] += 1
+            if busy and tries[0] < 40:  # a modal operator is still running (e.g. the drag that made a selection)
                 return 0.05
             if override is not None:
                 with bpy.context.temp_override(**override):

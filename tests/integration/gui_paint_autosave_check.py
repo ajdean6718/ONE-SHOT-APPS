@@ -14,8 +14,9 @@ from seam_studio.paint import rasterdoc as rd  # noqa: E402
 doc = bpy.context.scene.seam.rasters[0]
 out = {"layers": [[int(v) for v in rd.read_image_srgb8(ly.image)[10, 10]] for ly in doc.layers],
        "revs": [ly.rev for ly in doc.layers], "has_sel": bool(doc.has_selection), "warn": rd.pixel_restore_warning(),
-       "greens": int(((rd.read_image_srgb8(doc.layers[0].image)[..., 1] > 200)
-                      & (rd.read_image_srgb8(doc.layers[0].image)[..., 0] < 60)).sum())}
+       "greens": 0}
+x0 = rd.read_image_srgb8(doc.layers[0].image)
+out["greens"] = int(((x0[..., 1] > 200) & (x0[..., 0] < 60) & (x0[..., 3] > 200)).sum())
 with open(os.environ["SEAM_GUI_OUT"], "w") as fh:
     json.dump(out, fh)
 os._exit(0)

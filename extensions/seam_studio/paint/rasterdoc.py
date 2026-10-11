@@ -389,6 +389,7 @@ def snapshot_current(holder, kind: str) -> None:
 def _forget_applied(owner_id: str) -> None:
     for kind in _REV_ATTR:
         _applied.pop((owner_id, kind), None)
+    _load_lost[:] = [k for k in _load_lost if not k.startswith(owner_id + ":")]
 
 
 def _default_pixels(kind: str, w: int, h: int) -> np.ndarray:
@@ -942,6 +943,7 @@ def remove_doc(scene, doc) -> None:
         except (ReferenceError, RuntimeError):
             pass
     _cache_sigs.pop(f"rastercache:{rid}", None)
+    _pack_due.pop(rid, None)
     n = len(scene.seam.rasters)
     scene.seam.active_raster_index = max(0, min(scene.seam.active_raster_index, n - 1))
 
