@@ -299,3 +299,31 @@ def test_freeze_raster_users_keeps_the_texture_when_the_document_goes(engine):
     lk = link0()
     assert lk.state == "MISSING_SOURCE"
     assert _node_image(tgt) is not None and tuple(_rd().read_image_srgb8(_node_image(tgt))[0, 0]) == (200, 30, 20, 255)
+
+
+def test_deleting_the_raster_document_keeps_the_live_decal_picture(engine):
+    """End to end: the paint module freezes decal users before it removes the composite (no manual hook call)."""
+    link = _raster_decal()
+    tgt = link.target
+    doc = bpy.context.scene.seam.rasters[0]
+    composite_name = doc.composite.name
+    activate(doc.canvas)
+    assert bpy.ops.seam.raster_remove() == {"FINISHED"}
+    flush()
+    lk = link0()
+    assert lk.state == "MISSING_SOURCE"
+    img = _node_image(tgt)
+    assert img is not None and img.name != composite_name
+    assert tuple(_rd().read_image_srgb8(img)[0, 0]) == (200, 30, 20, 255)
+
+
+def test_resizing_the_canvas_keeps_a_paused_decal_picture(engine):
+    link = _raster_decal()
+    tgt = link.target
+    link0().state = "PAUSED"
+    doc = bpy.context.scene.seam.rasters[0]
+    _rd().resize_canvas(doc, 16, 4)
+    flush()
+    img = _node_image(tgt)
+    assert img is not None and tuple(img.size) == (8, 4)
+    assert tuple(_rd().read_image_srgb8(img)[0, 0]) == (200, 30, 20, 255)

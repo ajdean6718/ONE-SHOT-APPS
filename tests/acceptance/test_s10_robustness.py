@@ -268,19 +268,28 @@ def test_duplicating_source_and_result_together_creates_no_second_link(seam, eng
     assert_link_consistent(link_of(lid))
 
 
-def test_duplicating_a_raster_canvas_keeps_the_document(seam, engine, tmp_path):
+def test_duplicating_a_raster_canvas_makes_an_independent_document(seam, engine, tmp_path):
+    """Shift+D of a raster canvas never silently shares pixels: the copy gets its own document and images."""
     d = raster_doc()
+    orig_id = d.id
     op(bpy.ops.seam.raster_fill, color=(1.0, 0.0, 0.0, 1.0))
     flush()
     ref = png_composite(tmp_path, "ref.png")
     select(d.canvas)
     assert bpy.ops.object.duplicate("EXEC_DEFAULT", True, linked=False) == {"FINISHED"}
     flush()
-    assert len(bpy.context.scene.seam.rasters) == 1 and len(bpy.context.scene.seam.rasters[0].layers) == 1
-    assert np.array_equal(png_composite(tmp_path, "dup.png"), ref)
-    op(bpy.ops.seam.raster_fill, color=(0.0, 1.0, 0.0, 1.0))                      # still paintable
+    docs = bpy.context.scene.seam.rasters
+    assert len(docs) == 2 and all(len(x.layers) == 1 for x in docs)
+    copy = next(x for x in docs if x.id != orig_id)
+    orig = next(x for x in docs if x.id == orig_id)
+    assert copy.layers[0].image is not orig.layers[0].image                         # no shared pixel buffer
+    assert bpy.context.active_object.seam.raster_id == copy.id                      # the duplicate is the copy's canvas
+    assert np.array_equal(png_composite(tmp_path, "dup.png"), ref)                  # same picture at first
+    op(bpy.ops.seam.raster_fill, color=(0.0, 1.0, 0.0, 1.0))                      # paint the copy
     flush()
     assert tuple(png_composite(tmp_path, "painted.png")[5, 5]) == (0, 255, 0, 255)
+    select(orig.canvas)
+    assert np.array_equal(png_composite(tmp_path, "orig_after.png"), ref)           # original untouched
 
 
 # ====================================================================== invalid geometry

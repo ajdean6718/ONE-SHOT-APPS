@@ -901,10 +901,26 @@ def new_raster_doc(scene, name: str = "Raster", width: int = 1920, height: int =
     return scene.seam.rasters[n]
 
 
+def _freeze_decals(image, removing_source: bool) -> None:
+    """Give decals that display ``image`` (this document's composite) their own frozen copy before it is removed."""
+    if image is None:
+        return
+    try:
+        from ..link import decal
+    except ImportError:
+        return
+    try:
+        decal.freeze_raster_users(image, removing_source=removing_source)
+    except Exception:  # never block a document edit on decal bookkeeping
+        import traceback
+        traceback.print_exc()
+
+
 def remove_doc(scene, doc) -> None:
     """Delete a document with its canvas object, material and all images."""
     scene = scene or doc_scene(doc)
     obj, ma = doc.canvas, doc.material
+    _freeze_decals(doc.composite, removing_source=True)
     imgs = [doc.composite, doc.selection, doc.sink]
     if doc.selection is not None:
         snapshot_current(doc, "sel")
@@ -1839,6 +1855,7 @@ def resize_canvas(doc, width: int, height: int, anchor: str = "TOP_LEFT", scale_
             commit_pixels(ly, "mask", read_image_srgb8(ly.mask))
     doc.width, doc.height = width, height
     update_canvas_mesh(doc)
+    _freeze_decals(doc.composite, removing_source=False)
     _remove_image(doc.composite)
     doc.composite = None
     for ly in doc.layers:
