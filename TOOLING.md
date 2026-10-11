@@ -13,6 +13,8 @@ cloud sessions in this repository. Everything below is loaded automatically from
 | superpowers | claude-plugins-official | obra/superpowers | 15 workflow skills (brainstorming, writing-plans, TDD, systematic-debugging, ...) |
 | ui-ux-pro-max | ui-ux-pro-max-skill | nextlevelbuilder/ui-ux-pro-max-skill | 7 design skills plus the searchable design database |
 | ecc | ecc | affaan-m/everything-claude-code | 397 skills, 71 agents, 8 hooks, `chrome-devtools` MCP server |
+| the-agency (Tekkiiiii/the-agency) | project files, not a plugin | see "The Agency" below |
+| 27 wshobson/agents plugins | claude-code-workflows | wshobson/agents | javascript-typescript, frontend-mobile-development, backend-development, full-stack-orchestration, developer-essentials, unit-testing, tdd-workflows, security-scanning, api-scaffolding, database-design, ui-design, git-pr-workflows, debugging-toolkit, comprehensive-review, cicd-automation, deployment-strategies, accessibility-compliance, python-development, payment-processing, application-performance, code-refactoring, error-debugging, documentation-generation, llm-application-dev, agent-orchestration, multi-platform-apps, context-management |
 
 ECC is configured with `hooks_enabled=true` and `hook_profile=standard`. It adds
 roughly 46k always-on tokens to every session. Disable it in
@@ -34,6 +36,32 @@ Skipped from ComposioHQ/awesome-claude-skills: `connect`, `connect-apps`,
 `artifacts-builder`, `brand-guidelines`, `canvas-design`, `internal-comms`,
 `mcp-builder`, `skill-creator`, `slack-gif-creator`, `theme-factory`,
 `document-skills` (already enabled as claude.ai skills on this account).
+
+## The Agency (Tekkiiiii/the-agency)
+
+The upstream installer writes into `~/.claude/`, which does not survive a cloud
+container. The same layout is committed under `.claude/` instead:
+
+| Path | Contents |
+| --- | --- |
+| `.claude/skills/` | 236 Agency skills (its `webapp-testing` was skipped in favour of the Composio one already present) plus `INDEX.md` |
+| `.claude/agents/` | 72 agents in the upstream folder structure (engineering, design, critiques, council, ...) |
+| `.claude/hooks/` | 20 hook scripts; 12 are wired in `.claude/settings.json` (gate-guard, config-protection, secret-scanner, spawn-gate, track-edits, write-evidence, loop-detector, artifact-verify, startup-sync, check-settings-secrets, check-session-state, stop-chain) |
+| `.claude/mods/` | 5 Claude Code mods, wired through `env.CLAUDE_CODE_PLUGIN_DIRS` |
+| `.claude/core`, `runbooks`, `agents-archive`, `scripts`, `design-system` | Support trees the skills and hooks reference as `{agency-root}` |
+| `.claude/agency/cli` | The `agency` CLI. Run it as `node .claude/agency/cli/bin/agency.js <command>` |
+
+`env.AGENCY_HOME` points the hooks and CLI at `/home/user/ONE-SHOT-APPS/.claude`,
+and the hook commands use that absolute path, so this wiring assumes the cloud
+checkout location. `sqlite3` is not installed in the container, so hook features
+that use the SQLite task store degrade to their no-database path.
+
+## Context cost
+
+Always-on context from everything above is roughly 95k tokens per session:
+about 46k from ecc, 17k from the 27 wshobson plugins, 25k from the 256 project
+skills, and the rest from agents and the remaining plugins. Disable entries in
+`enabledPlugins` or delete skill folders to trim it.
 
 ## MCP servers (`.mcp.json`)
 

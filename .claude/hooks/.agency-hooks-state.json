@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "hooks": {
+    "gate-guard": {
+      "event": "PreToolUse",
+      "matcher": "Edit|Write",
+      "command": "bash {root}/hooks/gate-guard.sh"
+    },
+    "config-protection": {
+      "event": "PreToolUse",
+      "matcher": "Edit|Write",
+      "command": "bash {root}/hooks/config-protection.sh"
+    },
+    "secret-scanner": {
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "command": "bash {root}/hooks/secret-scanner.sh"
+    },
+    "spawn-gate": {
+      "event": "PreToolUse",
+      "matcher": "Agent",
+      "command": "bash {root}/hooks/spawn-gate.sh"
+    },
+    "track-edits": {
+      "event": "PostToolUse",
+      "matcher": "Edit|Write",
+      "command": "bash {root}/hooks/track-edits.sh"
+    },
+    "write-evidence": {
+      "event": "PostToolUse",
+      "matcher": "Edit|Write",
+      "command": "bash {root}/hooks/write-evidence.sh"
+    },
+    "loop-detector": {
+      "event": "PostToolUse",
+      "matcher": "",
+      "command": "bash {root}/hooks/loop-detector.sh"
+    },
+    "artifact-verify": {
+      "event": "PostToolUse",
+      "matcher": "Agent",
+      "command": "bash {root}/hooks/artifact-verify.sh"
+    },
+    "startup-sync": {
+      "event": "SessionStart",
+      "matcher": "",
+      "command": "bash {root}/hooks/startup-sync.sh"
+    },
+    "check-settings-secrets": {
+      "event": "SessionStart",
+      "matcher": "",
+      "command": "bash {root}/hooks/check-settings-secrets.sh"
+    },
+    "check-session-state": {
+      "event": "SessionStart",
+      "matcher": "",
+      "command": "bash {root}/hooks/check-session-state.sh"
+    },
+    "stop-chain": {
+      "event": "Stop",
+      "matcher": "",
+      "command": "bash {root}/hooks/session-end.sh && bash {root}/hooks/batch-check.sh && bash {root}/hooks/cost-tracker.sh"
+    }
+  },
+  "mods": {
+    "installed": [
+      "agent-ctx",
+      "context-band",
+      "loop-guard",
+      "spawn-ledger",
+      "voice-compact"
+    ],
+    "entries": [
+      "/home/user/ONE-SHOT-APPS/.claude/mods/agent-ctx",
+      "/home/user/ONE-SHOT-APPS/.claude/mods/context-band",
+      "/home/user/ONE-SHOT-APPS/.claude/mods/loop-guard",
+      "/home/user/ONE-SHOT-APPS/.claude/mods/spawn-ledger",
+      "/home/user/ONE-SHOT-APPS/.claude/mods/voice-compact"
+    ]
+  }
+}

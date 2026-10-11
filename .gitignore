@@ -1,3 +1,6 @@
 .playwright-mcp/
 node_modules/
 .agents/
+.claude/settings.local.json
+.claude/settings.json.bak-*
+__pycache__/
