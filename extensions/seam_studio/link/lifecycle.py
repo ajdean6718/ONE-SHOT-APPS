@@ -11,16 +11,23 @@ Runs at the start of every depsgraph update (``engine.add_update_hook``):
   undo or append) re-points to it and rebuilds.
 
 The cheap link checks run on every update; the id scan only when the object count changes.
+
+Also (connect wave): linked selection (:func:`sync_linked_selection`, driven by a msgbus subscription on the
+active object in the GUI, switchable with ``WindowManager.seam_sync_link_selection``) and the save/load
+handlers of the images SEAM creates for decals and paint (packed on save so they survive a reload).
 """
 
 from __future__ import annotations
 
+import traceback
+
 import bpy
+from bpy.props import BoolProperty
 
 from .. import ids
 from ..engine import core as engine
 from ..seam_core.ids import new_id
-from . import producer
+from . import decal, producer, resultpaint
 
 classes = ()
 
@@ -65,7 +72,8 @@ def check_links(scene) -> bool:
                 changed = True
             continue
         found = _find_in_scene(scene, link.source_id) if src is None else None
-        if found is not None and found.type in ("CURVE", "FONT"):
+        if found is not None and (found.type in ("CURVE", "FONT") or
+                                  (link.recipe == "DECAL" and found.seam.role in ("GROUP", "RASTER"))):
             link.source = found
             producer._apply(link, "source_restored")
             link.message = ""
@@ -137,19 +145,183 @@ def on_update(scene, depsgraph=None) -> None:
     check_links(scene)
 
 
+# ------------------------------------------------------------------ linked selection
+
+def sync_enabled(context=None) -> bool:
+    """The "Sync link selection" switch (a WindowManager property, so it is scene independent)."""
+    try:
+        wm = (context or bpy.context).window_manager
+        return bool(getattr(wm, "seam_sync_link_selection", True))
+    except Exception:
+        return True
+
+
+def sync_linked_selection(context=None) -> list:
+    """Select the objects linked to the active object without changing the active object.
+
+    The active object is a link *source*: its results (targets) are selected; it is a *result* (or the target
+    mesh of a Material decal): its sources are selected. Detached links and links with a missing end are
+    skipped; hidden, unselectable or out-of-view-layer objects are skipped silently. Returns the objects that
+    became selected by this call."""
+    ctx = context or bpy.context
+    scene = ctx.scene
+    seam = getattr(scene, "seam", None)
+    vl = ctx.view_layer
+    if seam is None or vl is None:
+        return []
+    active = vl.objects.active
+    if active is None:
+        return []
+    newly = []
+    for link in seam.links:
+        if link.state == "DETACHED":
+            continue
+        if link.source == active:
+            other = link.target
+        elif link.target == active:
+            other = link.source
+        else:
+            continue
+        if other is None or other == active or vl.objects.get(other.name) != other:
+            continue
+        try:
+            if other.select_get() or other.hide_get() or other.hide_select or other.hide_viewport:
+                continue
+            other.select_set(True)
+        except (RuntimeError, ReferenceError):
+            continue
+        newly.append(other)
+    return newly
+
+
+_msgbus_owner = object()
+_sync_pending = False
+
+
+def _sync_deferred():
+    global _sync_pending
+    _sync_pending = False
+    try:
+        if sync_enabled():
+            sync_linked_selection(bpy.context)
+    except Exception:
+        traceback.print_exc()
+    return None
+
+
+def _on_active_changed(*_args):
+    """msgbus notify: run the sync from a timer tick (selection changes do not belong in a notifier)."""
+    global _sync_pending
+    if _sync_pending or not sync_enabled():
+        return
+    _sync_pending = True
+    try:
+        bpy.app.timers.register(_sync_deferred, first_interval=0.0)
+    except Exception:
+        _sync_pending = False
+
+
+def subscribe_selection_sync() -> bool:
+    """(Re)subscribe to active-object changes (GUI only; msgbus subscriptions are dropped on file load)."""
+    if bpy.app.background:
+        return False
+    try:
+        bpy.msgbus.clear_by_owner(_msgbus_owner)
+        bpy.msgbus.subscribe_rna(key=(bpy.types.LayerObjects, "active"), owner=_msgbus_owner, args=(),
+                                 notify=_on_active_changed, options={"PERSISTENT"})
+        return True
+    except Exception:
+        traceback.print_exc()
+        return False
+
+
+def unsubscribe_selection_sync() -> None:
+    try:
+        bpy.msgbus.clear_by_owner(_msgbus_owner)
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------ images: pack on save, trust on load
+
+def pack_decal_images(scene=None) -> int:
+    """Pack the images SEAM owns for decals (raster decals share the paint module's composite)."""
+    n = 0
+    scenes = [scene] if scene is not None else list(bpy.data.scenes)
+    for sc in scenes:
+        for link in sc.seam.links:
+            img = link.decal_image
+            if link.recipe != "DECAL" or img is None or img.get(decal.IMAGE_PROP) is None or img.library is not None:
+                continue
+            try:
+                if img.packed_file is None or img.is_dirty:
+                    img.pack()
+                    n += 1
+            except Exception:
+                traceback.print_exc()
+    return n
+
+
+@bpy.app.handlers.persistent
+def _on_save_pre(*_args):
+    try:
+        pack_decal_images()
+        resultpaint.pack_paint_images()
+    except Exception:
+        traceback.print_exc()
+
+
 @bpy.app.handlers.persistent
 def _on_load(*_args):
     _object_counts.clear()
+    decal._applied.clear()
+    try:
+        for sc in bpy.data.scenes:
+            decal.seed_after_load(sc)
+        subscribe_selection_sync()
+    except Exception:
+        traceback.print_exc()
+
+
+@bpy.app.handlers.persistent
+def _on_undo_redo(*_args):
+    """Memfile undo restores properties (so the stored signature of a link) but not pixels written from Python:
+    a restored decal image can be blank while its link still reports the matching signature. Forget what the
+    pixels were rendered for; the engine's own undo/redo handler requests a revalidation, so every vector decal
+    rebuilds exactly once."""
+    decal._applied.clear()
+
+
+_UNDO_LISTS = lambda: (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post)  # noqa: E731
 
 
 def register():
+    bpy.types.WindowManager.seam_sync_link_selection = BoolProperty(
+        name="Sync Link Selection", default=True,
+        description="Selecting a live-link source also selects its results, and the other way round "
+                    "(the active object does not change)")
     engine.add_update_hook(on_update)
-    if _on_load not in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.append(_on_load)
+    for lst, fn in ((bpy.app.handlers.load_post, _on_load), (bpy.app.handlers.save_pre, _on_save_pre)):
+        if fn not in lst:
+            lst.append(fn)
+    for lst in _UNDO_LISTS():
+        if _on_undo_redo not in lst:
+            lst.append(_on_undo_redo)
+    subscribe_selection_sync()
 
 
 def unregister():
     engine.remove_update_hook(on_update)
-    while _on_load in bpy.app.handlers.load_post:
-        bpy.app.handlers.load_post.remove(_on_load)
+    for lst, fn in ((bpy.app.handlers.load_post, _on_load), (bpy.app.handlers.save_pre, _on_save_pre)):
+        while fn in lst:
+            lst.remove(fn)
+    for lst in _UNDO_LISTS():
+        while _on_undo_redo in lst:
+            lst.remove(_on_undo_redo)
+    unsubscribe_selection_sync()
+    try:
+        del bpy.types.WindowManager.seam_sync_link_selection
+    except AttributeError:
+        pass
     _object_counts.clear()
+    decal._applied.clear()

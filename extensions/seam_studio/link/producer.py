@@ -18,7 +18,7 @@ from .. import bridge, compat
 from ..engine import core as engine
 from ..seam_core import links as L
 from ..seam_core.mesh import mesh_signature
-from . import recipes
+from . import decal, recipes
 
 classes = ()
 
@@ -73,6 +73,8 @@ def source_signature(scene, link) -> Optional[str]:
     src = link.source
     if not in_scene(src, scene):
         return MISSING
+    if link.recipe == "DECAL":
+        return decal.signature(scene, link, MISSING)
     paths = recipes.shape_frame_paths(src, scene)
     params = params_dict(link)
     extra = [link.recipe, L.params_signature(link.recipe, params)]
@@ -281,7 +283,7 @@ class LinkProducer(engine.Producer):
         out = []
         if isinstance(id_orig, bpy.types.Object):
             for link in seam.links:
-                if link.source == id_orig:
+                if link.source == id_orig or (link.recipe == "DECAL" and decal.depends_on(link, id_orig)):
                     out.append(key_for(link))
                 elif link.target == id_orig and link.stale and link.state in ("LIVE", "ERROR"):
                     out.append(key_for(link))  # e.g. left edit mode while an update was waiting
@@ -289,6 +291,12 @@ class LinkProducer(engine.Producer):
             for link in seam.links:
                 src = link.source
                 if src is not None and src.data == id_orig:
+                    out.append(key_for(link))
+                elif link.recipe == "DECAL" and decal.depends_on_data(link, id_orig):
+                    out.append(key_for(link))
+        elif isinstance(id_orig, bpy.types.Image):  # a raster decal follows its (shared) image
+            for link in seam.links:
+                if link.recipe == "DECAL" and decal.src_is_raster(link) and link.decal_image == id_orig:
                     out.append(key_for(link))
         return out
 
@@ -308,7 +316,11 @@ class LinkProducer(engine.Producer):
 
     def stored_signature(self, scene, key: str) -> Optional[str]:
         link = link_from_key(scene, key)
-        return None if link is None else link.source_signature
+        if link is None:
+            return None
+        if link.recipe == "DECAL":
+            return decal.stored_signature(link)
+        return link.source_signature
 
     def build(self, scene, key: str, signature: str) -> engine.BuildResult:
         t0 = time.perf_counter()
@@ -335,40 +347,53 @@ class LinkProducer(engine.Producer):
             _apply(link, "source_changed")
             return engine.BuildResult(key, "conflict", link.message)
         target = link.target
-        busy = target_busy_mode(target)
+        is_decal = link.recipe == "DECAL"
+        # a MATERIAL decal never writes the target mesh: no mode / conflict checks, only image + material
+        writes_mesh = not (is_decal and decal.mode_of(link) == "MATERIAL")
+        busy = target_busy_mode(target) if writes_mesh else None
         if busy:
             link.stale = True
             link.message = "Waiting: the result is in %s" % busy
             return engine.BuildResult(key, "waiting", link.message)
-        if not force:
+        if not force and writes_mesh:
             reasons = target_conflicts(link)
             if reasons:
                 _apply(link, "target_modified")
                 link.message = "Result edited downstream (%s): Overwrite, Bake or Branch" % ", ".join(reasons)
                 return engine.BuildResult(key, "conflict", link.message)
         try:
-            built = recipes.build(link.recipe, recipes.shape_frame_paths(link.source, scene), params_dict(link),
-                                  recipes.source_mirrored(link.source, scene))
+            if is_decal:
+                built, notes = decal.build(scene, link, signature, L.validate_params("DECAL", params_dict(link)))
+            else:
+                built = recipes.build(link.recipe, recipes.shape_frame_paths(link.source, scene), params_dict(link),
+                                      recipes.source_mirrored(link.source, scene))
+                notes = list(built.messages)
         except recipes.RecipeError as exc:
             _apply(link, "build_error")
             link.message = str(exc)
             link.source_signature = signature  # do not retry until the source or params change
+            if is_decal:
+                decal.mark_applied(link, signature)
             return engine.BuildResult(key, "error", link.message, (time.perf_counter() - t0) * 1000.0)
-        me = target.data
-        if force and me.shape_keys is not None:
-            target.shape_key_clear()
-        groups = _vertex_group_state(target)
-        link.target_signature = write_mesh(me, built)
-        _restore_vertex_groups(target, groups)
-        # from the arrays just written (== read_data_signature(me); asserted by the tests)
-        link.target_data_signature = _data_signature_arrays(
-            built.uvs if (built.uvs is not None and len(built.corner_verts)) else None, built.materials)
-        update_materials(link)
+        if writes_mesh:
+            me = target.data
+            if force and me.shape_keys is not None:
+                target.shape_key_clear()
+            groups = _vertex_group_state(target)
+            link.target_signature = write_mesh(me, built)
+            _restore_vertex_groups(target, groups)
+            # from the arrays just written (== read_data_signature(me); asserted by the tests)
+            link.target_data_signature = _data_signature_arrays(
+                built.uvs if (built.uvs is not None and len(built.corner_verts)) else None, built.materials)
+            if not is_decal:
+                update_materials(link)
         ms = (time.perf_counter() - t0) * 1000.0
         link.source_signature = signature
+        if is_decal:
+            decal.mark_applied(link, signature)
         link.build_count += 1
         link.last_build_ms = ms
-        link.message = "; ".join(built.messages)
+        link.message = "; ".join(notes)
         _apply(link, "build_ok")
         return engine.BuildResult(key, "ok", link.message, ms)
 

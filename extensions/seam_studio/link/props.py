@@ -77,6 +77,8 @@ class SEAM_PG_Link(bpy.types.PropertyGroup):
     target_data_signature: StringProperty()
     build_count: IntProperty()
     last_build_ms: FloatProperty()
+    # DECAL: the image the link keeps current (its own "SEAM Decal <source>", or a raster document composite)
+    decal_image: PointerProperty(name="Decal Image", type=bpy.types.Image)
     # one-shot: the next build may discard downstream edits (set by Overwrite / Branch)
     force_overwrite: BoolProperty(default=False, options={"HIDDEN"})
 
