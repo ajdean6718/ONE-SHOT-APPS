@@ -17,6 +17,8 @@ extrapolated):
   png       PNG export of a 1920 x 1080 artboard (100 shapes, strokes and gradients) through ``seam.png_export``.
   raster    compositing 4 layers of 2048 x 2048 (numpy kernel and the in-Blender document path).
   svg       SVG export (outlines / text) and import through ``seam.svg_export`` / ``seam.svg_import``.
+  diag      what one node edit costs inside a 500-shape document: depsgraph updates per handler pass, keys the
+            engine examines per flush, and a cProfile of one flush.
 
 Outputs: ``artifacts/perf/run-<runtime>.json`` per runtime and ``artifacts/perf/summary.json`` (hardware, versions,
 all runs).  ``--all`` also regenerates ``docs/perf.md`` from the summary.
@@ -36,7 +38,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PERF_DIR = os.path.join(ROOT, "artifacts", "perf")
 VENV52 = os.environ.get("SEAM_BPY52_PYTHON", "/opt/seam-cache/venv-bpy52/bin/python")
 BLENDER40 = os.environ.get("SEAM_BLENDER", "/usr/bin/blender")
-ALL_SECTIONS = ("link", "doc", "png", "raster", "svg")
+ALL_SECTIONS = ("link", "doc", "png", "raster", "svg", "diag")
 
 
 # ------------------------------------------------------------------ small utilities
@@ -342,8 +344,13 @@ def bench_doc(quick):
         initial_ms = (time.perf_counter() - t0) * 1000.0
         flush()
         no_change = timed(lambda i: flush(), reps)
-        depsgraph_only = timed(lambda i: bpy.context.view_layer.update(), reps)
         target = objs[(n // 2) // 10 * 10]          # a stroked shape with a gradient: the edit rebuilds derived data
+
+        def edit_and_evaluate(i):                   # the depsgraph share of an edit: node edit + view_layer.update()
+            nudge(target, i)
+            bpy.context.view_layer.update()
+        depsgraph_only = timed(edit_and_evaluate, reps)
+        flush()                                      # the engine catches up with those edits before the next measurement
         changed = []
         built_keys = []
         for k in range(reps + 2):
@@ -493,9 +500,55 @@ def bench_svg(quick):
             "export_text": stats(as_text), "export_text_bytes": size_text, "import": stats(imp), "imported_shapes": imported}
 
 
+# ------------------------------------------------------------------ diagnostics: where does an edit go?
+
+def bench_diag(quick):
+    import bpy
+    import cProfile
+    import pstats
+    n = 200 if quick else 500
+    new_canvas()
+    objs = showcase(n)
+    flush()
+    tgt = objs[(n // 2) // 10 * 10]
+    passes = []
+
+    def handler(scene, dg):
+        passes.append({"updates": len(dg.updates), "objects": sum(1 for u in dg.updates if isinstance(u.id, bpy.types.Object))})
+    bpy.app.handlers.depsgraph_update_post.append(handler)
+    try:
+        nudge(tgt, 0)
+        flush()
+        passes.clear()
+        nudge(tgt, 1)
+        res = flush()
+        edit_passes = list(passes)
+        examined = len(res)
+        built = [r.key.split(":")[0] for r in res if r.status == "ok"]
+        nudge(tgt, 2)
+        pr = cProfile.Profile()
+        pr.enable()
+        flush()
+        pr.disable()
+    finally:
+        bpy.app.handlers.depsgraph_update_post.remove(handler)
+    st = pstats.Stats(pr)
+    rows = []
+    for (fn, line, name), (cc, nc, tt, ct, _callers) in sorted(st.stats.items(), key=lambda kv: -kv[1][3]):
+        if "seam_studio" not in fn and "scripts/modules" not in fn:
+            continue
+        rows.append({"function": "%s:%d %s" % (os.path.relpath(fn, ROOT) if fn.startswith(ROOT) else os.path.basename(fn), line, name),
+                     "calls": nc, "cumulative_ms": round(ct * 1000.0, 1), "self_ms": round(tt * 1000.0, 1)})
+        if len(rows) >= 8:
+            break
+    return {"shapes": n, "handler_passes": edit_passes, "keys_examined_per_flush": examined, "built_kinds": built,
+            "profile_one_flush": rows, "flush_ms_profiled_total": round(sum(r["cumulative_ms"] for r in rows[:1]), 1)}
+
+
 # ------------------------------------------------------------------ driver
 
-SECTION_FUNCS = {"link": bench_link, "doc": bench_doc, "png": bench_png, "raster": bench_raster, "svg": bench_svg}
+SECTION_FUNCS = {"link": bench_link, "doc": bench_doc, "png": bench_png, "raster": bench_raster, "svg": bench_svg,
+                 "diag": bench_diag}
 
 
 def runtime_info():
@@ -529,6 +582,17 @@ def run_in_runtime(opts):
     result["hardware"]["load_avg_end"] = [round(x, 2) for x in os.getloadavg()]
     out = opts["out"] or os.path.join(PERF_DIR, "run-%s.json" % info["id"])
     os.makedirs(os.path.dirname(out), exist_ok=True)
+    if os.path.exists(out) and not opts["quick"] and set(opts["only"]) != set(ALL_SECTIONS):
+        with open(out) as fh:                         # a partial re-run updates only the sections it measured
+            old = json.load(fh)
+        if not old.get("quick"):
+            old["sections"].update(result["sections"])
+            old["failures"] = {k: v for k, v in old.get("failures", {}).items() if k not in opts["only"]}
+            old["failures"].update(result["failures"])
+            old["partial_rerun"] = {"sections": opts["only"], "started": result["started"],
+                                    "load_avg_start": result["hardware"]["load_avg_start"],
+                                    "load_avg_end": result["hardware"]["load_avg_end"]}
+            result = old
     with open(out, "w") as fh:
         json.dump(result, fh, indent=1)
     print("wrote", out, flush=True)
@@ -644,14 +708,14 @@ def write_doc(summary):
     L.append("## Document size scaling\n")
     L.append("Shapes are fills (every 2nd also stroked, every 5th with a gradient) on a 1920 x 1080 artboard, no links. "
              "*flush, no change* is `engine.flush()` with nothing dirty; *flush, one node edit* edits one shape and "
-             "flushes; *view_layer.update only* is the bare depsgraph evaluation that every flush includes.\n")
+             "flushes; *node edit + view_layer.update only* is the same edit followed by just the depsgraph evaluation (no engine builds): the share of a flush that Blender itself spends.\n")
     sizes = sorted({int(n) for rid in ids for n in runs[rid]["sections"].get("doc", {})})
     rows = []
     for n in sizes:
         n = str(n)
         rows += [("%s shapes - flush, no change" % n, lambda s, n=n: _fmt(s["doc"][n]["flush_no_change"])),
                  ("%s shapes - flush, one node edit" % n, lambda s, n=n: _fmt(s["doc"][n]["flush_one_node_edit"])),
-                 ("%s shapes - view_layer.update only" % n, lambda s, n=n: _fmt(s["doc"][n]["view_layer_update_only"])),
+                 ("%s shapes - node edit + view_layer.update only" % n, lambda s, n=n: _fmt(s["doc"][n]["view_layer_update_only"])),
                  ("%s shapes - builds per edit (median)" % n, lambda s, n=n: s["doc"][n]["builds_per_edit_median"]),
                  ("%s shapes - first flush after creation (ms)" % n, lambda s, n=n: s["doc"][n]["initial_flush_ms"]),
                  ("%s shapes - save / open .blend (ms)" % n, lambda s, n=n: "%s / %s" % (s["doc"][n]["blend_save_ms"],
@@ -685,6 +749,48 @@ def write_doc(summary):
         ("import of the exported file", lambda s: _fmt(s["svg"]["import"])),
         ("exported file size, outlines (bytes)", lambda s: s["svg"]["export_outlines_bytes"]),
         ("shapes after import", lambda s: s["svg"]["imported_shapes"])])
+
+    if all("diag" in runs[rid]["sections"] for rid in ids):
+        n = runs[ids[0]]["sections"]["diag"]["shapes"]
+        L.append("## Where one node edit goes in a %d-shape document\n" % n)
+        L.append("Measured with `scripts/bench.py --only diag`: one node edit on a stroked shape with a gradient, then one "
+                 "`engine.flush()`. *depsgraph passes* lists, per `depsgraph_update_post` handler call during that flush, "
+                 "how many datablocks Blender reported as updated (and how many of them were objects). *keys examined* is "
+                 "the number of engine keys looked at by the flush (a key is examined, then skipped when its signature is "
+                 "unchanged). The profile is `cProfile` of one more flush, restricted to add-on and Blender Python frames.\n")
+        table("one flush after one node edit", [
+            ("depsgraph passes (updates / objects)", lambda s: "; ".join("%d / %d" % (p["updates"], p["objects"]) for p in s["diag"]["handler_passes"])),
+            ("keys examined per flush", lambda s: s["diag"]["keys_examined_per_flush"]),
+            ("keys rebuilt", lambda s: ", ".join(s["diag"]["built_kinds"]) or "none")])
+        for rid in ids:
+            L.append("Profile on %s (top frames by cumulative time):\n" % rid)
+            L.append(_row(["function", "calls", "cumulative ms", "self ms"]))
+            L.append(_row(["---", "---", "---", "---"]))
+            for r in runs[rid]["sections"]["diag"]["profile_one_flush"]:
+                L.append(_row(["`%s`" % r["function"], r["calls"], r["cumulative_ms"], r["self_ms"]]))
+            L.append("")
+
+    L.append("## Observations (computed from the numbers above)\n")
+    for rid in ids:
+        sec = runs[rid]["sections"]
+        parts = []
+        if "link" in sec:
+            worst = max(sec["link"].items(), key=lambda kv: kv[1]["flush_after_edit"]["p95_ms"])
+            parts.append("link edits: slowest case is `%s` at %.1f ms p95 (flush after edit)" % (
+                worst[0], worst[1]["flush_after_edit"]["p95_ms"]))
+        if "doc" in sec and sec["doc"]:
+            big = sec["doc"][max(sec["doc"], key=int)]
+            parts.append("%d-shape document: %.1f ms median for one node edit, %.0f ms for the first flush after creation" % (
+                big["shapes"], big["flush_one_node_edit"]["median_ms"], big["initial_flush_ms"]))
+        if "raster" in sec:
+            r = sec["raster"]
+            parts.append("2048 x 2048 raster: fill %.0f ms, composite rebuild %.0f ms, kernel composite %.0f ms (medians)" % (
+                r["fill_operator_60pct_selection"]["median_ms"], r["update_composite_4_layers"]["median_ms"],
+                r["kernel_composite"]["median_ms"]))
+        if "png" in sec:
+            parts.append("1920 x 1080 PNG export: %.0f ms median" % sec["png"]["scale1_operator"]["median_ms"])
+        L.append("- **%s**: %s." % (rid, "; ".join(parts)))
+    L.append("")
 
     fails = {rid: runs[rid]["failures"] for rid in ids if runs[rid]["failures"]}
     if fails:
