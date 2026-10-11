@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SEAM test fixture (original). Every feature here must produce an import warning. -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 100 100">
+  <defs>
+    <filter id="blur"><feGaussianBlur stdDeviation="2"/></filter>
+    <mask id="m"><rect width="50" height="50" fill="white"/></mask>
+    <pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse"><rect width="5" height="5"/></pattern>
+    <rect id="shared" width="10" height="10"/>
+  </defs>
+  <use xlink:href="#shared" x="5" y="5"/>
+  <text x="10" y="90">Hello</text>
+  <rect id="blurred" x="10" y="10" width="30" height="30" filter="url(#blur)"/>
+  <rect id="masked" x="50" y="10" width="30" height="30" mask="url(#m)"/>
+  <rect id="patterned" x="10" y="50" width="30" height="30" fill="url(#p)"/>
+  <rect id="dashed" x="50" y="50" width="30" height="30" fill="none" stroke="black" stroke-dasharray="4 2"/>
+  <image x="0" y="0" width="10" height="10" xlink:href="data:image/png;base64,AAAA"/>
+</svg>
