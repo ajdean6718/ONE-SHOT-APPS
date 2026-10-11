@@ -115,7 +115,10 @@ def test_validation_fallback(engine):
     assert recipes.validate_rings([square]) == []
     assert recipes.validate_rings([[(0, 0), (5, 0), (10, 0)]])
     assert recipes.validate_rings([bow])
-    assert recipes.validate_rings([bow], check_self_intersection=False)  # still zero area
+    v = recipes.validate_rings_local
+    assert v([square]) == [] and v([square[:2]]) and v([[(0, 0), (5, 0), (10, 0)]])
+    assert "crosses itself" in v([bow])[0]
+    assert "no area" in v([bow], check_self_intersection=False)[0]  # symmetric bow tie: zero net area
     # large ring is fast enough (blockwise numpy)
     import math
     import time

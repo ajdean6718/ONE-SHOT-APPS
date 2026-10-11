@@ -223,7 +223,11 @@ def validate_rings(rings, check_self_intersection: bool = True) -> List[str]:
             issues = [i for i in issues if i.code != "SELF_INTERSECTION"]
         return [_issue_text(i.message, i.point) for i in issues]
     except NotImplementedError:
-        pass
+        return validate_rings_local(rings, check_self_intersection)
+
+
+def validate_rings_local(rings, check_self_intersection: bool = True) -> List[str]:
+    """Reference validator used until ``seam_core.geometry.validate_rings`` is available."""
     problems = []
     for k, ring in enumerate(rings):
         if len(ring) < 3:
