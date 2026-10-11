@@ -1,8 +1,5 @@
 """Layer/mask/canvas operators, paint mode entry (owner: paint)."""
 
-import contextlib
-import functools
-
 import bpy
 import numpy as np
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
@@ -11,6 +8,7 @@ from .. import compat
 from ..seam_core import raster as R
 from . import rasterdoc as rd
 from . import selection as sel
+from .undo import _undoable_in_paint_mode, flush_property_undo, note_property_edit  # noqa: F401  (re-exported)
 
 
 def _luma(rgb) -> float:
@@ -41,42 +39,6 @@ def paint_color_linear(context):
 
 def _active(context):
     return rd.active_doc(context.scene)
-
-
-@contextlib.contextmanager
-def _object_mode_for_edit(context, doc):
-    """Blender records no memfile undo steps in Texture Paint mode, so a pixel edit made there could not be undone.
-    Leave paint mode around the edit (when the canvas is in it) and push an undo step in Object mode, then re-enter."""
-    obj = getattr(doc, "canvas", None)
-    in_paint = obj is not None and obj.mode == "TEXTURE_PAINT"
-    if not in_paint:
-        yield
-        return
-    bpy.ops.object.mode_set(mode="OBJECT")
-    try:
-        yield
-        bpy.ops.ed.undo_push(message="SEAM pixel edit")
-    finally:
-        try:
-            context.tool_settings.image_paint.mode = "MATERIAL"
-            bpy.ops.object.mode_set(mode="TEXTURE_PAINT")
-            rd.sync_paint_target(doc)
-            rd.check_external_edits(doc)
-            sel.sync_stencil(doc)
-        except RuntimeError:
-            pass
-
-
-def _undoable_in_paint_mode(execute):
-    """Decorator for ``execute`` methods that edit pixels (see :func:`_object_mode_for_edit`)."""
-    @functools.wraps(execute)
-    def wrapper(self, context):
-        doc = _active(context)
-        if doc is None:
-            return execute(self, context)
-        with _object_mode_for_edit(context, doc):
-            return execute(self, context)
-    return wrapper
 
 
 def _need_doc(cls, context) -> bool:
@@ -479,6 +441,7 @@ class SEAM_OT_raster_paint_mode(bpy.types.Operator):
                 _focus_canvas(context, doc)
                 bpy.ops.object.mode_set(mode="OBJECT")
             rd.show_composite(doc)
+            rd.pack_layer_images(doc)  # strokes into the image data that the undo step (and auto save) captures
             return {"FINISHED"}
         obj = _focus_canvas(context, doc)
         if obj.name not in context.view_layer.objects:
@@ -494,6 +457,7 @@ class SEAM_OT_raster_paint_mode(bpy.types.Operator):
             return {"CANCELLED"}
         rd.sync_paint_target(doc)  # slots exist now: select the target slot
         rd.check_external_edits(doc)  # record the pixel baseline for stroke detection
+        rd.pack_layer_images(doc)
         selection.sync_stencil(doc)
         layer = rd.active_layer(doc)
         if layer is not None and layer.locked:
@@ -590,6 +554,7 @@ class SEAM_OT_raster_resize_canvas(bpy.types.Operator):
             self.report({"WARNING"}, "Leave Texture Paint mode before resizing the canvas")
             return {"CANCELLED"}
         rd.resize_canvas(doc, self.width, self.height, self.anchor, self.scale_content)
+        rd.pack_layer_images(_active(context))
         return {"FINISHED"}
 
 
