@@ -112,7 +112,7 @@ def purge_owner_leftovers(sid: str) -> int:
     curve data and its SEAM material. Returns the number of datablocks removed."""
     n = 0
     img = bpy.data.images.get("SEAM Gradient " + sid)
-    if img is not None:
+    if img is not None and _is_gradient_image(img):
         bpy.data.images.remove(img)
         n += 1
     mats = [m for m in bpy.data.materials if m.get("seam_owner") == sid]
@@ -127,11 +127,16 @@ def purge_owner_leftovers(sid: str) -> int:
     return n
 
 
+def _is_gradient_image(img) -> bool:
+    """Only images created by sync_gradient carry this marker; name prefixes are not ownership."""
+    return img.get("seam_kind") == "gradient"
+
+
 def _orphan_gradient_ids(scene) -> List[str]:
     live = {o.seam.id for o in _shape_objects(scene) if o.seam.id}
     out = []
     for img in bpy.data.images:
-        if img.name.startswith("SEAM Gradient "):
+        if img.name.startswith("SEAM Gradient ") and _is_gradient_image(img):
             sid = img.name[len("SEAM Gradient "):]
             if sid not in live:
                 out.append(sid)
@@ -341,7 +346,7 @@ def sync_gradient(ob, depsgraph=None) -> None:
     name = gradient_image_name(ob)
     img = bpy.data.images.get(name)
     if st.fill_type == "SOLID":
-        if img is not None:
+        if img is not None and _is_gradient_image(img):
             bpy.data.images.remove(img)
         mat = _owned_material(ob)
         if mat is not None and mat.node_tree is not None:
@@ -358,6 +363,8 @@ def sync_gradient(ob, depsgraph=None) -> None:
     if img is None:
         img = bpy.data.images.new(name, GRADIENT_SIZE, GRADIENT_SIZE, alpha=True, float_buffer=False)
         img.colorspace_settings.name = "sRGB"
+        img["seam_kind"] = "gradient"
+        img["seam_owner"] = ob.seam.id
         img.alpha_mode = "STRAIGHT"
         img["seam_hash"] = ""
     if img.get("seam_hash") != digest or not img.has_data:
