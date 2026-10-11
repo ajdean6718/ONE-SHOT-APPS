@@ -139,3 +139,25 @@ def test_every_kernel_blend_mode_is_covered_by_the_parity_tests(seam):
     import re
     covered = set(re.findall(r'"([A-Z_]+)"', open(__file__).read().split("@pytest.mark.parametrize")[1].split("def test_blend")[0]))
     assert set(all_blend_modes()) <= covered | {"NORMAL"}
+
+
+@pytest.mark.parametrize("mode", ["MULTIPLY", "SCREEN", "OVERLAY", "ADD"])
+@pytest.mark.parametrize("bg", ["TRANSPARENT", "COLOR"])
+def test_partial_alpha_stacks_with_blend_modes_match_composite(seam, kernel, tmp_path, mode, bg):
+    """Independent parity evidence (Cycles vs the numpy compositor) for partly transparent lower layers."""
+    r = rd()
+    doc = fresh_doc(6, 4, f"PA{mode}{bg}", bg)
+    if bg == "COLOR":
+        doc.background_color = (0.3, 0.6, 0.2, 0.5)
+    r.add_layer(doc, "Mid")
+    r.add_layer(doc, "Top")
+    for i, ly in enumerate(doc.layers):
+        px = noise(4, 6, 300 + i)
+        px[..., 3] = np.random.default_rng(310 + i).integers(192, 256, (4, 6))  # partial, above the 8-bit premultiply range
+        paint_pixels(ly, px)
+    doc.layers[1].blend_mode = mode
+    doc.layers[1].opacity = 0.8
+    doc.layers[2].blend_mode = mode
+    doc.layers[2].opacity = 0.7
+    # looser than the opaque cases: Blender stores 8-bit textures alpha-premultiplied, which costs ~1 extra bit at alpha 0.75
+    assert_matches(doc, tmp_path, atol=0.02)

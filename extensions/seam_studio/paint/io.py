@@ -13,6 +13,7 @@ from bpy.props import EnumProperty, StringProperty
 
 from ..seam_core import png
 from ..seam_core import raster as R
+from .ops import _undoable_in_paint_mode
 from . import rasterdoc as rd
 
 PLACEMENT_ITEMS = [
@@ -89,6 +90,7 @@ class SEAM_OT_raster_import_png(bpy.types.Operator):
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         doc = rd.active_doc(context.scene)
         path = bpy.path.abspath(self.filepath)

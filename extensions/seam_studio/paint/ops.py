@@ -1,5 +1,8 @@
 """Layer/mask/canvas operators, paint mode entry (owner: paint)."""
 
+import contextlib
+import functools
+
 import bpy
 import numpy as np
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, FloatVectorProperty, IntProperty, StringProperty
@@ -38,6 +41,42 @@ def paint_color_linear(context):
 
 def _active(context):
     return rd.active_doc(context.scene)
+
+
+@contextlib.contextmanager
+def _object_mode_for_edit(context, doc):
+    """Blender records no memfile undo steps in Texture Paint mode, so a pixel edit made there could not be undone.
+    Leave paint mode around the edit (when the canvas is in it) and push an undo step in Object mode, then re-enter."""
+    obj = getattr(doc, "canvas", None)
+    in_paint = obj is not None and obj.mode == "TEXTURE_PAINT"
+    if not in_paint:
+        yield
+        return
+    bpy.ops.object.mode_set(mode="OBJECT")
+    try:
+        yield
+        bpy.ops.ed.undo_push(message="SEAM pixel edit")
+    finally:
+        try:
+            context.tool_settings.image_paint.mode = "MATERIAL"
+            bpy.ops.object.mode_set(mode="TEXTURE_PAINT")
+            rd.sync_paint_target(doc)
+            rd.check_external_edits(doc)
+            sel.sync_stencil(doc)
+        except RuntimeError:
+            pass
+
+
+def _undoable_in_paint_mode(execute):
+    """Decorator for ``execute`` methods that edit pixels (see :func:`_object_mode_for_edit`)."""
+    @functools.wraps(execute)
+    def wrapper(self, context):
+        doc = _active(context)
+        if doc is None:
+            return execute(self, context)
+        with _object_mode_for_edit(context, doc):
+            return execute(self, context)
+    return wrapper
 
 
 def _need_doc(cls, context) -> bool:
@@ -186,6 +225,7 @@ class SEAM_OT_raster_layer_add(bpy.types.Operator):
     def poll(cls, context):
         return _need_doc(cls, context)
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         rd.add_layer(_active(context), self.name or None)
         return {"FINISHED"}
@@ -205,6 +245,7 @@ class SEAM_OT_raster_layer_remove(_LayerOp, bpy.types.Operator):
             return False
         return True
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         doc = _active(context)
         i = self._index(doc)
@@ -223,6 +264,7 @@ class SEAM_OT_raster_layer_duplicate(_LayerOp, bpy.types.Operator):
     def poll(cls, context):
         return _need_doc(cls, context)
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         doc = _active(context)
         i = self._index(doc)
@@ -244,6 +286,7 @@ class SEAM_OT_raster_layer_move(_LayerOp, bpy.types.Operator):
     def poll(cls, context):
         return _need_doc(cls, context)
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         doc = _active(context)
         i = self._index(doc)
@@ -272,8 +315,12 @@ class SEAM_OT_raster_layer_merge_down(_LayerOp, bpy.types.Operator):
         if doc.layers[i - 1].locked or doc.layers[i].locked:
             cls.poll_message_set("Locked layers cannot be merged")
             return False
+        if not (doc.layers[i - 1].visible and doc.layers[i].visible):
+            cls.poll_message_set("Hidden layers cannot be merged: show both layers first")
+            return False
         return True
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         doc = _active(context)
         i = self._index(doc)
@@ -282,7 +329,16 @@ class SEAM_OT_raster_layer_merge_down(_LayerOp, bpy.types.Operator):
         if doc.layers[i - 1].locked or doc.layers[i].locked:
             self.report({"WARNING"}, "Locked layers cannot be merged")
             return {"CANCELLED"}
-        rd.merge_down(doc, i)
+        before = rd.composite_array(doc)
+        try:
+            rd.merge_down(doc, i)
+        except ValueError as exc:
+            self.report({"WARNING"}, str(exc))
+            return {"CANCELLED"}
+        err = float(np.abs(rd.composite_array(_active(context)) - before).max(initial=0.0))
+        if err > 0.01:  # the composite model is not associative for partly transparent layers / non-normal blends
+            self.report({"WARNING"}, f"Merged, but the look changed slightly (max difference {err:.2f}): "
+                                     "the lower layer is partly transparent or not in Normal mode")
         return {"FINISHED"}
 
 
@@ -306,6 +362,7 @@ class SEAM_OT_raster_mask_add(_LayerOp, bpy.types.Operator):
             return False
         return True
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         doc = _active(context)
         i = self._index(doc)
@@ -332,6 +389,7 @@ class SEAM_OT_raster_mask_apply(_LayerOp, bpy.types.Operator):
             return False
         return True
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         doc = _active(context)
         i = self._index(doc)
@@ -356,6 +414,7 @@ class SEAM_OT_raster_mask_remove(_LayerOp, bpy.types.Operator):
             return False
         return True
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         doc = _active(context)
         i = self._index(doc)
@@ -465,6 +524,7 @@ class SEAM_OT_raster_fill(bpy.types.Operator):
             self.color = c
         return self.execute(context)
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         doc = _active(context)
         layer = rd.active_layer(doc)
@@ -490,6 +550,7 @@ class SEAM_OT_raster_clear(bpy.types.Operator):
     def poll(cls, context):
         return _need_layer_unlocked(cls, context)
 
+    @_undoable_in_paint_mode
     def execute(self, context):
         doc = _active(context)
         layer = rd.active_layer(doc)

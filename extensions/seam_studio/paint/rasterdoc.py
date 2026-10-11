@@ -374,9 +374,24 @@ def _content_rev(img, key, rev: int) -> Optional[int]:
     return None
 
 
+_restore_lost: List[str] = []  # holders whose pixels could not be restored by the last undo/redo (journal evicted)
+
+
+def pixel_restore_warning() -> str:
+    """Non-empty when the last undo/redo could not restore some pixels because the journal memory cap evicted them."""
+    if not _restore_lost:
+        return ""
+    return (f"Undo restored the settings but not the pixels of {len(_restore_lost)} image(s): "
+            "the undo history memory limit was reached")
+
+
 def restore_pixels_after_undo() -> int:
-    """Make every SEAM image hold the pixels of the revision that undo/redo restored. Returns images restored."""
+    """Make every SEAM image hold the pixels of the revision that undo/redo restored. Returns images restored.
+
+    Pixels whose journal entry was evicted (memory cap) stay as they are; that is recorded in
+    :func:`pixel_restore_warning` (shown in the Raster Document panel) instead of failing silently."""
     n = 0
+    _restore_lost.clear()
     holders = list(_pixel_holders())
     present = {(h.id, k) for _d, h, k in holders}
     for k in [k for k in _applied if k not in present]:
@@ -393,6 +408,7 @@ def restore_pixels_after_undo() -> int:
         if a8 is None:
             if rev != 0:
                 print(f"SEAM: no journal entry for {kind} revision {rev} of {holder.id}; pixels left as they are")
+                _restore_lost.append(f"{holder.id}:{kind}")
                 _applied[key] = rev
                 continue
             a8 = _default_pixels(kind, w, h)
@@ -546,8 +562,10 @@ def add_layer(doc, name: Optional[str] = None, index: Optional[int] = None):
 
 
 def remove_layer(doc, index: int) -> None:
-    """Delete a layer (and its mask image)."""
+    """Delete a layer (and its mask image). A document always keeps at least one layer."""
     _check_index(doc, index)
+    if len(doc.layers) <= 1:
+        raise ValueError("a raster document needs at least one layer")
     layer = doc.layers[index]
     lid = layer.id
     snapshot_current(layer, "img")  # undo restores the (blank) image datablock; the journal refills it
@@ -611,26 +629,34 @@ def duplicate_layer(doc, index: int):
 def merge_down(doc, index: int):
     """Merge layer ``index`` into the layer below it.
 
-    The result keeps the lower layer's name, opacity, blend mode and visibility.  The lower layer's mask is baked
-    into its alpha first; the upper layer contributes with its own opacity, blend mode and mask.  The look is
-    preserved exactly (up to 8-bit rounding) when the lower layer is opaque; with partially transparent pixels it
-    is approximate because the composite model of ``seam_core.raster`` is not associative.  Returns the merged
-    layer."""
+    The result keeps the lower layer's name and blend mode.  The lower layer's mask and opacity are baked into its
+    alpha first (its opacity becomes 1), and the upper layer contributes with its own opacity, blend mode and mask.
+    The composite model of ``seam_core.raster`` (a straight-alpha Mix chain) is not associative, so the look of the
+    document is preserved exactly (up to 8-bit rounding) only when the lower layer is opaque at full opacity with a
+    NORMAL blend mode, or when the upper layer's coverage is binary; otherwise it is approximate (the operator
+    measures and reports the difference).  Hidden layers have no look to preserve, so merging a pair where either
+    layer is hidden raises ``ValueError``.  Returns the merged layer."""
     _check_index(doc, index)
     if index == 0:
         raise ValueError("no layer below to merge into")
     upper = doc.layers[index]
     lower = doc.layers[index - 1]
+    if not (upper.visible and lower.visible):
+        raise ValueError("cannot merge hidden layers: show both layers first")
     w, h = doc_size(doc)
     base = layer_array(lower)
     lm = mask_array(lower)
     if lm is not None and lower.mask_enabled:
         base = R.apply_mask_to_alpha(base, lm)
+    if float(lower.opacity) != 1.0:  # bake the opacity: factor = alpha * opacity * mask, so this is exact
+        base = base.copy()
+        base[..., 3] = base[..., 3] * np.float32(lower.opacity)
     specs = [R.LayerSpec(rgba=base, opacity=1.0, blend_mode="NORMAL", visible=True, mask=None),
              R.LayerSpec(rgba=layer_array(upper), opacity=float(upper.opacity), blend_mode=upper.blend_mode,
                          visible=True, mask=(mask_array(upper) if upper.mask_enabled else None))]
     merged = R.composite(specs, h, w, None)
     write_layer_array(lower, merged)
+    lower.opacity = 1.0
     if lower.mask is not None:
         snapshot_current(lower, "mask")
         _remove_image(lower.mask)
@@ -1396,6 +1422,11 @@ def _after_history_jump() -> None:
     for sc in bpy.data.scenes:
         for doc in sc.seam.rasters:
             sync_paint_target(doc)  # the object mode may differ from the one the node selection was made in
+            try:  # tool settings survive memfile undo but the selection (and its flag) does not
+                from . import selection
+                selection.sync_stencil(doc)
+            except Exception:
+                traceback.print_exc()
     _restart_paint_watch_if_needed()
 
 
@@ -1412,6 +1443,7 @@ def _on_undo_redo(*_args):
 def _on_load_post(*_args):
     try:
         journal_clear()
+        _restore_lost.clear()
         mark_pixels_applied()
         _after_history_jump()
     except Exception:

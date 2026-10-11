@@ -22,7 +22,6 @@ SELECTION_OP_ITEMS = [(m, m.title(), d) for m, d in (
     ("REPLACE", "Replace the selection"), ("ADD", "Add to the selection"),
     ("SUBTRACT", "Subtract from the selection"), ("INTERSECT", "Intersect with the selection"))]
 
-_sel_rev: Dict[str, int] = {}
 
 
 # --------------------------------------------------------------------------- data
@@ -78,7 +77,6 @@ def set_selection(doc, mask: Optional[np.ndarray], op: str = "REPLACE") -> bool:
         return clear_selection(doc)
     _write(doc, new)
     doc.has_selection = True
-    _sel_rev[doc.id] = _sel_rev.get(doc.id, 0) + 1
     sync_stencil(doc)
     return True
 
@@ -88,7 +86,6 @@ def clear_selection(doc) -> bool:
     if doc.selection is not None and doc.has_selection:
         _write(doc, np.zeros(rd.doc_size(doc)[::-1], np.float32))
     doc.has_selection = False
-    _sel_rev[doc.id] = _sel_rev.get(doc.id, 0) + 1
     sync_stencil(doc)
     return False
 
@@ -144,10 +141,6 @@ def effective_mask(doc) -> np.ndarray:
 
 # --------------------------------------------------------------------------- stencil
 
-def _is_seam_selection(scene, img) -> bool:
-    return img is not None and any(d.selection is not None and d.selection == img for d in scene.seam.rasters)
-
-
 def sync_stencil(doc) -> None:
     """Wire the selection to the native image-paint stencil (or switch the stencil off)."""
     scene = rd.doc_scene(doc)
@@ -166,7 +159,9 @@ def sync_stencil(doc) -> None:
                 me.uv_layer_stencil_index = idx
     else:
         cur = ip.stencil_image
-        if cur is None or _is_seam_selection(scene, cur):
+        other = next((d for d in scene.seam.rasters if d.selection is not None and d.selection == cur), None)
+        # switch it off unless it still serves another document that has a selection
+        if cur is None or (other is not None and not other.has_selection) or cur == doc.selection:
             ip.use_stencil_layer = False
             ip.invert_stencil = False
 
@@ -213,7 +208,7 @@ def _draw_outline():  # pragma: no cover - GUI only
         return
     if doc is None or not doc.has_selection or doc.canvas is None or doc.canvas.name not in scene.objects:
         return
-    key = (_sel_rev.get(doc.id, 0), doc.width, doc.height)
+    key = (int(doc.sel_rev), doc.width, doc.height)  # sel_rev is saved and restored by undo
     cached = _outline_cache.get(doc.id)
     if cached is None or cached[0] != key:
         seg = outline_segments(selection_array(doc))
@@ -467,5 +462,4 @@ def unregister():
         except Exception:
             pass
         _draw_handle = None
-    _sel_rev.clear()
     _outline_cache.clear()
