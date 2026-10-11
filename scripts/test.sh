@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# SEAM Studio test runner. Usage: scripts/test.sh [unit|int40|int52|gui|all] [extra pytest args...]
+# SEAM Studio test runner. Usage: scripts/test.sh [unit|int40|int52|acc40|acc52|gui|all] [extra pytest args...]
 # Logs: artifacts/test-logs/<suite>.log ; exit code = first failing suite's code.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -41,6 +41,18 @@ run_int40() {
   "$BLENDER40" -b --factory-startup --python-exit-code 1 --python "$ROOT/scripts/blender_pytest.py" -- -q tests/integration "$@" 2>&1 | tee "$LOGDIR/int40.log"; return ${PIPESTATUS[0]}
 }
 
+run_acc52() {
+  isolated_profile
+  echo "== acceptance (Blender 5.2.2 LTS bpy module)"
+  "$VENV52" -m pytest -q -p no:cacheprovider tests/acceptance "$@" 2>&1 | tee "$LOGDIR/acc52.log"; return ${PIPESTATUS[0]}
+}
+
+run_acc40() {
+  isolated_profile
+  echo "== acceptance (Blender 4.0.2 binary, background)"
+  "$BLENDER40" -b --factory-startup --python-exit-code 1 --python "$ROOT/scripts/blender_pytest.py" -- -q tests/acceptance "$@" 2>&1 | tee "$LOGDIR/acc40.log"; return ${PIPESTATUS[0]}
+}
+
 run_gui() {
   if [ -x "$ROOT/tests/gui/run_all.sh" ]; then
     "$ROOT/tests/gui/run_all.sh" "$@" 2>&1 | tee "$LOGDIR/gui.log"; return ${PIPESTATUS[0]}
@@ -52,10 +64,12 @@ case "$SUITE" in
   unit) run_unit "$@" ;;
   int52) run_int52 "$@" ;;
   int40) run_int40 "$@" ;;
+  acc52) run_acc52 "$@" ;;
+  acc40) run_acc40 "$@" ;;
   gui) run_gui "$@" ;;
   all)
     rc=0
-    for s in run_unit run_int52 run_int40 run_gui; do $s "$@"; r=$?; [ $rc -eq 0 ] && rc=$r; done
+    for s in run_unit run_int52 run_int40 run_acc52 run_acc40 run_gui; do $s "$@"; r=$?; [ $rc -eq 0 ] && rc=$r; done
     exit $rc ;;
   *) echo "unknown suite $SUITE"; exit 2 ;;
 esac
