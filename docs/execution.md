@@ -32,3 +32,14 @@ Changes in `.claude/settings.json` (take effect at the next session start; this 
 
 ## Measured run data
 (appended as the run progresses)
+
+### Wave 1 (started 00:43 UTC)
+| Workflow | Streams | Wall time | Subagent tokens | Agents |
+|---|---|---|---|---|
+| wdut7olpa | core-geometry, core-raster-io | 55.2 min | 1,100,052 | 5 (review passed core-raster-io → no fix stage) |
+| wtt3zsr22 | link (Opus), vector-a | 48.2 min | 1,429,473 | 6 |
+| wtz8vd0i5 | vector-b | 43.8 min | 723,202 | 3 |
+| wi938n4vn | paint, shell | (running) | | |
+Observed concurrency: 7 implementation agents at once (4 workflows), load average 3.2–4.5 on 4 vCPU.
+Integration defects found at merge: 1 (gradient-image purge by name prefix deleted foreign images → ownership marker), fixed in ac00f1e.
+Link update latency (from link worker, under load avg ~4.5): 4-pt square 1.4 ms (4.0.2) / 2.5 ms (5.2.2) median; 200-pt curved shape 37–38 ms median.
