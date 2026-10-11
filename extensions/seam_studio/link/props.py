@@ -75,6 +75,8 @@ class SEAM_PG_Link(bpy.types.PropertyGroup):
     target_signature: StringProperty()
     build_count: IntProperty()
     last_build_ms: FloatProperty()
+    # one-shot: the next build may discard downstream edits (set by Overwrite / Branch)
+    force_overwrite: BoolProperty(default=False, options={"HIDDEN"})
 
 
 classes = (SEAM_PG_LinkParams, SEAM_PG_Link)
