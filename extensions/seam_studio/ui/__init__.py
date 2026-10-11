@@ -4,6 +4,6 @@ the top-level package before the root property groups."""
 
 from . import props  # noqa: F401
 
-from . import prefs, health, panels, workspaces, keymaps  # noqa: E402
+from . import util, prefs, document, health, ops, panels, workspaces, keymaps  # noqa: E402
 
-modules = (prefs, health, panels, workspaces, keymaps,)
+modules = (prefs, health, ops, panels, workspaces, keymaps,)

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# SEAM Studio launcher: Blender with the SEAM application template in an isolated profile.
+#
+#   scripts/seam-studio [blender args] [file.blend]
+#
+# SEAM_BLENDER   path to the Blender executable (default: `blender` on PATH)
+# SEAM_PROFILE   profile directory (default: <checkout>/.seam-profile); created by scripts/bootstrap.sh
+# Examples:  scripts/seam-studio doc.blend
+#            scripts/seam-studio --background --python-expr "import bpy; print(bpy.data.workspaces.keys())"
+set -euo pipefail
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+PROFILE="${SEAM_PROFILE:-$ROOT/.seam-profile}"
+BLENDER="${SEAM_BLENDER:-blender}"
+if [ ! -e "$PROFILE/scripts/startup/bl_app_templates_user/seam/__init__.py" ] || [ ! -f "$ROOT/application_templates/seam/startup.blend" ]; then
+  echo "seam-studio: profile or startup.blend missing, running scripts/bootstrap.sh ..." >&2
+  "$ROOT/scripts/bootstrap.sh" --quiet >&2
+fi
+export BLENDER_USER_CONFIG="$PROFILE/config"
+export BLENDER_USER_SCRIPTS="$PROFILE/scripts"
+exec "$BLENDER" --app-template seam "$@"
