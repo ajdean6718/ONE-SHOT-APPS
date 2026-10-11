@@ -90,10 +90,26 @@ def set_active_link(scene, link) -> None:
             return
 
 
+LIVE_OFF_MESSAGE = "Live updates are off: turn them on to build the result"
+
+
+def live_enabled(scene) -> bool:
+    eng = getattr(getattr(scene, "seam", None), "engine", None)
+    return True if eng is None else bool(eng.live_enabled)
+
+
 def rebuild_now(scene, link) -> Optional[engine.BuildResult]:
-    """Build ``link`` immediately (inside the operator, so the undo step holds the result)."""
+    """Build ``link`` immediately (inside the operator, so the undo step holds the result).
+
+    With the global live switch off nothing is built: the key stays dirty (it builds as soon as
+    live updates are turned back on), the link is marked stale and a "waiting" result is returned
+    so callers report it instead of claiming success."""
     key = producer.key_for(link)
     engine.mark_dirty(key)
+    if not live_enabled(scene):
+        link.stale = True
+        link.message = LIVE_OFF_MESSAGE
+        return engine.BuildResult(key, "waiting", LIVE_OFF_MESSAGE)
     results = engine.flush(scene)
     mine = [r for r in results if r.key == key]
     return mine[-1] if mine else None
@@ -422,8 +438,9 @@ class SEAM_OT_link_overwrite(_LinkOp, bpy.types.Operator):
         link = self.get_link(context)
         if link is None:
             return {"CANCELLED"}
-        if producer.target_in_edit_mode(link.target):
-            self.report({"ERROR"}, "Leave Edit Mode on the result first")
+        busy = producer.target_busy_mode(link.target)
+        if busy:
+            self.report({"ERROR"}, "Leave %s on the result first" % busy)
             return {"CANCELLED"}
         producer._apply(link, "overwrite")
         link.force_overwrite = True
@@ -452,8 +469,9 @@ class SEAM_OT_link_branch(_LinkOp, bpy.types.Operator):
         if link is None:
             return {"CANCELLED"}
         tgt = link.target
-        if producer.target_in_edit_mode(tgt):
-            self.report({"ERROR"}, "Leave Edit Mode on the result first")
+        busy = producer.target_busy_mode(tgt)
+        if busy:
+            self.report({"ERROR"}, "Leave %s on the result first" % busy)
             return {"CANCELLED"}
         copy = branch_copy(link)
         producer._apply(link, "branch")

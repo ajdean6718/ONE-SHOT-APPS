@@ -89,7 +89,50 @@ def test_revolve_when_available(engine):
     link = make_link(prof, "REVOLVE", revolve_segments=16)
     assert link.state == "LIVE", link.message
     ex = extent(link.target)
-    assert ex[0] == pytest.approx(1.2, abs=1e-2) and ex[2] == pytest.approx(1.2, abs=1e-2)
+    assert ex[0] == pytest.approx(1.2, abs=1e-2) and ex[1] == pytest.approx(1.2, abs=1e-2)
+    assert ex[2] == pytest.approx(1.2, abs=1e-5)  # profile height 120 px * 0.01, axis along +Z (UPRIGHT)
+    co, mats = mesh_arrays(link.target)
+    assert co[:, 2].min() == pytest.approx(0.0, abs=1e-6)  # origin BOTTOM
+    assert set(mats.tolist()) <= {0, 1}
+    _assert_outward(link.target)
+    # FLAT lays the axis along +Y; still a closed, outward-facing solid
+    flat = make_link(prof, "REVOLVE", revolve_segments=16, orientation="FLAT")
+    assert flat.state == "LIVE", flat.message
+    assert extent(flat.target)[1] == pytest.approx(1.2, abs=1e-5)
+    _assert_outward(flat.target)
+    # about its own origin, a mirrored source revolves to the same outward-facing solid
+    # (with LEFT the axis is the *visible* left edge of the mirrored drawing: a different solid)
+    a = make_link(prof, "REVOLVE", revolve_segments=16, revolve_axis="SOURCE_ORIGIN")
+    mirrored = make_shape("VaseM", rings=(((0, 0), (60, 0), (40, 100), (0, 120)),), closed=False)
+    mirrored.scale = (-1.0, 1.0, 1.0)
+    lm = make_link(mirrored, "REVOLVE", revolve_segments=16, revolve_axis="SOURCE_ORIGIN")
+    assert a.state == "LIVE" and lm.state == "LIVE", (a.message, lm.message)
+    _assert_outward(a.target)
+    _assert_outward(lm.target)
+    assert _volume(lm.target) == pytest.approx(_volume(a.target), rel=1e-6)
+
+
+def _volume(obj):
+    me = obj.data
+    vol = 0.0
+    for p in me.polygons:
+        vs = [me.vertices[i].co for i in p.vertices]
+        for k in range(1, len(vs) - 1):
+            vol += vs[0].dot(vs[k].cross(vs[k + 1])) / 6.0
+    return vol
+
+
+def _assert_outward(obj):
+    """Closed (convex) revolve solid: positive signed volume and every face normal pointing away from
+    the centre, i.e. consistent outward normals."""
+    import numpy as np
+    me = obj.data
+    vol = _volume(obj)
+    assert vol > 0.0, vol
+    co, _ = mesh_arrays(obj)
+    centre = (co.max(axis=0) + co.min(axis=0)) * 0.5
+    away = [np.dot(np.array(p.normal), np.array(p.center) - centre) for p in me.polygons if p.area > 1e-9]
+    assert sum(1 for d in away if d < -1e-6) == 0
 
 
 def test_revolve_unavailable_reports_and_disables(engine):
@@ -229,3 +272,61 @@ def test_sweep_intersection_matches_brute_force():
             import math
             ring = sorted(ring, key=lambda p: math.atan2(p[1] - 50, p[0] - 50))
         assert (recipes._ring_self_intersects(ring) is not None) == _brute(ring), ring
+
+
+def test_rings_crossing_each_other_are_invalid(engine):
+    from seam_studio.link import recipes
+    from test_link_support import SQUARE
+    outer = [(-100, -100), (100, -100), (100, 100), (-100, 100)]
+    sticking_out = [(50, -50), (50, 50), (150, 50), (150, -50)]
+    inside = [(-40, -40), (-40, 40), (40, 40), (40, -40)]
+    v = recipes.validate_rings_local
+    assert v([outer, inside]) == []
+    problems = v([outer, sticking_out])
+    assert len(problems) == 1 and "paths 1 and 2 cross each other" in problems[0], problems
+    assert v([outer, sticking_out], check_self_intersection=False) == []  # TEXT3D: Blender nests overlaps
+    # touching rings (shared vertex, no proper crossing) are not reported
+    assert v([outer, [(100, 100), (150, 100), (150, 150)]]) == []
+    # end to end (core validator when merged, else the fallback): ERROR, previous geometry kept
+    src = make_shape("X", rings=(SQUARE, tuple(sticking_out)))
+    activate(src)
+    bpy.ops.seam.make_3d(recipe="EXTRUDE")
+    link = bpy.context.scene.seam.links[-1]
+    assert link.state == "ERROR" and link.message.startswith("Invalid shape"), link.message
+
+
+def _brute_multi(rings):
+    from seam_studio.link import recipes
+    import numpy as np
+    edges = []
+    for r, ring in enumerate(rings):
+        n = len(ring)
+        for i in range(n):
+            edges.append((r, i, n, np.asarray(ring[i], float), np.asarray(ring[(i + 1) % n], float)))
+    for x in range(len(edges)):
+        for y in range(x + 1, len(edges)):
+            ra, ia, na, p0, p1 = edges[x]
+            rb, ib, nb, q0, q1 = edges[y]
+            if ra == rb and (abs(ia - ib) in (0, 1, na - 1)):
+                continue
+            if recipes._first_crossing(p0[None], p1[None], q0[None], q1[None]) is not None:
+                return True
+    return False
+
+
+def test_multi_ring_sweep_matches_brute_force():
+    import math
+    import random
+    from seam_studio.link import recipes
+    rnd = random.Random(11)
+    for trial in range(60):
+        rings = []
+        for _ in range(rnd.randint(2, 4)):
+            cx, cy, rad = rnd.uniform(0, 100), rnd.uniform(0, 100), rnd.uniform(5, 40)
+            n = rnd.randint(3, 12)
+            angles = sorted(rnd.uniform(0, 2 * math.pi) for _ in range(n))
+            ring = [(cx + rad * math.cos(a), cy + rad * math.sin(a)) for a in angles]  # each ring simple
+            if trial % 4 == 0:
+                rnd.shuffle(ring)
+            rings.append(ring)
+        assert (recipes._rings_cross(rings) is not None) == _brute_multi(rings), rings

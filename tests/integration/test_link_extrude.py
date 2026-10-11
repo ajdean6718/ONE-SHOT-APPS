@@ -90,7 +90,19 @@ def test_bevel_keeps_total_depth(engine):
                      bevel_resolution=2)
     ex = extent(link.target)
     assert ex[2] == pytest.approx(0.2, abs=1e-5)
+    assert ex[0] == pytest.approx(2.0, abs=1e-5) and ex[1] == pytest.approx(2.0, abs=1e-5)  # footprint kept
     assert len(link.target.data.polygons) > 10
+
+
+def test_bevel_keeps_footprint_and_hole(engine):
+    from test_link_support import HOLE, SQUARE
+    src = make_shape("BevHole", rings=(SQUARE, HOLE))
+    link = make_link(src, "EXTRUDE", orientation="FLAT", origin="SOURCE", depth=0.2, bevel_depth=0.05,
+                     bevel_resolution=3)
+    co, _ = mesh_arrays(link.target)
+    assert extent(link.target) == pytest.approx((2.0, 2.0, 0.2), abs=1e-5)
+    inner = co[(abs(co[:, 0]) < 0.7) & (abs(co[:, 1]) < 0.7)]
+    assert len(inner) and float(abs(inner[:, :2]).max(axis=1).min()) == pytest.approx(0.4, abs=1e-5)  # hole size kept
 
 
 def test_open_paths_ignored_with_message(engine):

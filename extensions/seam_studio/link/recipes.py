@@ -147,16 +147,29 @@ def _orient2(u, v, w):
 
 
 def _ring_self_intersects(ring) -> Optional[Tuple[float, float]]:
-    """First proper intersection between non-adjacent edges of a closed ring.
-
-    Sort-and-sweep on x (numpy): only edge pairs whose x-ranges overlap are tested, so typical
-    outlines cost O(n log n); candidate pairs are processed in bounded chunks.
-    """
-    n = len(ring)
-    if n < 4:
+    """First proper intersection between non-adjacent edges of a closed ring."""
+    if len(ring) < 4:
         return None
-    a0 = np.asarray(ring, dtype=np.float64)
-    a1 = np.roll(a0, -1, axis=0)
+    hit = _rings_cross([ring])
+    return None if hit is None else hit[0]
+
+
+def _rings_cross(rings) -> Optional[Tuple[Tuple[float, float], int, int]]:
+    """First proper crossing between edges of the closed ``rings`` -> (point, ring_a, ring_b).
+
+    Covers a ring crossing itself (ring_a == ring_b, adjacent edges excluded) and two rings crossing
+    each other (e.g. a hole sticking out of its outer ring). Sort-and-sweep on x (numpy): only edge
+    pairs whose x-ranges overlap are tested, so typical outlines cost O(n log n); candidate pairs are
+    processed in bounded chunks.
+    """
+    parts = [np.asarray(r, dtype=np.float64).reshape(-1, 2) for r in rings if len(r) >= 2]
+    if not parts:
+        return None
+    a0 = np.concatenate(parts)
+    a1 = np.concatenate([np.roll(p, -1, axis=0) for p in parts])
+    rid = np.concatenate([np.full(len(p), k, dtype=np.int64) for k, p in enumerate(parts)])
+    rlen = np.concatenate([np.full(len(p), len(p), dtype=np.int64) for p in parts])
+    n = len(a0)
     mn = np.minimum(a0, a1)
     mx = np.maximum(a0, a1)
     order = np.argsort(mn[:, 0], kind="stable")
@@ -180,12 +193,15 @@ def _ring_self_intersects(ring) -> Optional[Tuple[float, float]]:
             b = order[rel + 1 + offs]
             keep = (mn[a, 1] <= mx[b, 1]) & (mn[b, 1] <= mx[a, 1])
             d = np.abs(a - b)
-            keep &= (d != 1) & (d != n - 1) & (d != 0)
+            same = rid[a] == rid[b]
+            keep &= ~same | ((d != 1) & (d != rlen[a] - 1) & (d != 0))
             a, b = a[keep], b[keep]
             if len(a):
                 hit = _first_crossing(a0[a], a1[a], a0[b], a1[b])
                 if hit is not None:
-                    return hit
+                    pt, k = hit
+                    ra, rb = int(rid[a[k]]), int(rid[b[k]])
+                    return pt, min(ra, rb), max(ra, rb)
         i0 = i1
     return None
 
@@ -202,10 +218,10 @@ def _first_crossing(p0, p1, q0, q1):
     k = np.nonzero(hit)[0]
     if not len(k):
         return None
-    k = k[0]
+    k = int(k[0])
     t = d3[k] / (d3[k] - d4[k])
     pt = p0[k] + t * (p1[k] - p0[k])
-    return (float(pt[0]), float(pt[1]))
+    return (float(pt[0]), float(pt[1])), k
 
 
 def _issue_text(message, point) -> str:
@@ -229,15 +245,24 @@ def validate_rings(rings, check_self_intersection: bool = True) -> List[str]:
 def validate_rings_local(rings, check_self_intersection: bool = True) -> List[str]:
     """Reference validator used until ``seam_core.geometry.validate_rings`` is available."""
     problems = []
+    crossing = set()
+    if check_self_intersection:
+        usable = [k for k, ring in enumerate(rings) if len(ring) >= 3]
+        found = _rings_cross([rings[k] for k in usable])
+        if found is not None:
+            pt, ra, rb = found
+            ra, rb = usable[ra], usable[rb]
+            if ra == rb:
+                problems.append(_issue_text("path %d crosses itself" % (ra + 1), pt))
+            else:
+                problems.append(_issue_text("paths %d and %d cross each other" % (ra + 1, rb + 1), pt))
+            crossing.update((ra, rb))
     for k, ring in enumerate(rings):
         if len(ring) < 3:
             problems.append("path %d has fewer than 3 points" % (k + 1))
             continue
-        if check_self_intersection:
-            hit = _ring_self_intersects(ring)
-            if hit is not None:
-                problems.append(_issue_text("path %d crosses itself" % (k + 1), hit))
-                continue
+        if k in crossing:
+            continue
         span = float(np.ptp(np.asarray(ring, dtype=np.float64), axis=0).max())
         if abs(_signed_area(ring)) <= 1e-9 * max(span, 1e-9) ** 2:
             problems.append("path %d encloses no area" % (k + 1))
@@ -423,6 +448,9 @@ def build_extrude(paths: Sequence[BezierPath], params: dict, mirrored: bool = Fa
     _set(cu, "extrude", max(depth * 0.5 - bevel, 0.0))
     _set(cu, "bevel_depth", bevel)
     _set(cu, "bevel_resolution", params["bevel_resolution"])
+    # a filled 2D bevel grows the outline by bevel_depth (outer rings out, holes in); inset by the same
+    # amount so the footprint stays source size * units_scale (verified winding-independent, 4.0 + 5.2)
+    _set(cu, "offset", -bevel)
     co, totals, corners, normals, centers, uvs = _evaluate(ob, cu)
     if not len(totals):
         raise RecipeError("The shape produced no faces (is it empty or degenerate?)")

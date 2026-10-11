@@ -119,6 +119,36 @@ def reference_signature(co, totals, corners) -> str:
     return mesh_signature(co.tolist(), [f.tolist() for f in faces])
 
 
+def _data_signature_arrays(uvs, materials, decimals: int = 5) -> str:
+    """Hash of what the geometry signature does not cover but downstream users edit:
+    UV coordinates of "UVMap" and per-face material indices."""
+    import hashlib
+    h = hashlib.blake2b(digest_size=16)
+    mats = np.asarray(materials, dtype=np.int64).ravel()
+    h.update(np.array([len(mats)], dtype="<u4").tobytes())
+    h.update(mats.astype("<i4").tobytes())
+    if uvs is None:
+        h.update(b"no-uv")
+    else:
+        uv = np.asarray(uvs, dtype=np.float32).astype(np.float64).ravel()
+        h.update(np.array([len(uv)], dtype="<u4").tobytes())
+        h.update(np.round(uv * 10 ** decimals).astype("<i8").tobytes())
+    return h.hexdigest()
+
+
+def read_data_signature(me) -> str:
+    nf, nl = len(me.polygons), len(me.loops)
+    mats = np.empty(nf, dtype=np.int32)
+    if nf:
+        me.polygons.foreach_get("material_index", mats)
+    uvl = me.uv_layers.get("UVMap")
+    uvs = None
+    if uvl is not None and nl:
+        uvs = np.empty(nl * 2, dtype=np.float32)
+        uvl.data.foreach_get("uv", uvs)
+    return _data_signature_arrays(uvs, mats)
+
+
 # ------------------------------------------------------------------ conflict detection (D10)
 
 def _has_weights(obj) -> bool:
@@ -137,6 +167,8 @@ def target_conflicts(link) -> List[str]:
     reasons = []
     if link.target_signature and read_mesh_signature(me) != link.target_signature:
         reasons.append("mesh was edited")
+    elif link.target_data_signature and read_data_signature(me) != link.target_data_signature:
+        reasons.append("UVs or face materials were edited")
     if me.shape_keys is not None and len(me.shape_keys.key_blocks):
         reasons.append("shape keys")
     if _has_weights(obj):
@@ -152,14 +184,48 @@ def target_conflicts(link) -> List[str]:
     return reasons
 
 
-def target_in_edit_mode(obj) -> bool:
+def target_busy_mode(obj) -> Optional[str]:
+    """Readable name of the interactive mode the target is in ("Edit Mode", "Sculpt Mode", ...),
+    or None in Object Mode. Writing the mesh under an active mode session is never safe."""
     try:
-        return obj.mode == "EDIT" or bool(getattr(obj.data, "is_editmode", False))
+        mode = obj.mode
+        if mode == "OBJECT" and not getattr(obj.data, "is_editmode", False):
+            return None
     except ReferenceError:
-        return False
+        return None
+    if mode == "OBJECT":
+        mode = "EDIT"
+    if mode.startswith("EDIT"):
+        return "Edit Mode"
+    return "%s Mode" % mode.replace("_", " ").title()
+
+
+def target_in_edit_mode(obj) -> bool:
+    """True when the target is in any non-Object mode (kept name: used by ops and tests)."""
+    return target_busy_mode(obj) is not None
 
 
 # ------------------------------------------------------------------ writing
+
+def _vertex_group_state(obj):
+    return ([(g.name, g.lock_weight) for g in obj.vertex_groups], obj.vertex_groups.active_index)
+
+
+def _restore_vertex_groups(obj, state) -> None:
+    """``clear_geometry()`` drops the vertex-group *names* (stored on the mesh since Blender 3.0).
+    Re-create them (empty, same order/lock/active) so modifiers that name a group keep their target."""
+    groups, active = state
+    if not groups:
+        return
+    for name, lock in groups:
+        g = obj.vertex_groups.get(name)
+        if g is None:
+            g = obj.vertex_groups.new(name=name)
+        if g.lock_weight != lock:
+            g.lock_weight = lock
+    if 0 <= active < len(obj.vertex_groups) and obj.vertex_groups.active_index != active:
+        obj.vertex_groups.active_index = active
+
 
 def write_mesh(me, built: recipes.Built) -> str:
     """Replace the mesh contents (keeps material slots); returns the new target signature."""
@@ -249,6 +315,11 @@ class LinkProducer(engine.Producer):
         link = link_from_key(scene, key)
         if link is None:
             return engine.BuildResult(key, "obsolete")
+        # one-shot (set by Overwrite / Branch): consumed by the very next build attempt whatever its
+        # outcome, so a failed or skipped build can never leave conflict detection disabled
+        force = bool(link.force_overwrite)
+        if force:
+            link.force_overwrite = False
         if signature == MISSING:
             _apply(link, "source_missing")
             link.message = "Source was deleted; relink or detach"
@@ -260,14 +331,14 @@ class LinkProducer(engine.Producer):
             _apply(link, "source_changed")
             link.message = "Paused: the source changed; resume to update"
             return engine.BuildResult(key, "skipped", link.message)
-        force = bool(link.force_overwrite)
         if link.state == "CONFLICT" and not force:
             _apply(link, "source_changed")
             return engine.BuildResult(key, "conflict", link.message)
         target = link.target
-        if target_in_edit_mode(target):
+        busy = target_busy_mode(target)
+        if busy:
             link.stale = True
-            link.message = "Waiting: the result is in Edit Mode"
+            link.message = "Waiting: the result is in %s" % busy
             return engine.BuildResult(key, "waiting", link.message)
         if not force:
             reasons = target_conflicts(link)
@@ -286,14 +357,18 @@ class LinkProducer(engine.Producer):
         me = target.data
         if force and me.shape_keys is not None:
             target.shape_key_clear()
+        groups = _vertex_group_state(target)
         link.target_signature = write_mesh(me, built)
+        _restore_vertex_groups(target, groups)
+        # from the arrays just written (== read_data_signature(me); asserted by the tests)
+        link.target_data_signature = _data_signature_arrays(
+            built.uvs if (built.uvs is not None and len(built.corner_verts)) else None, built.materials)
         update_materials(link)
         ms = (time.perf_counter() - t0) * 1000.0
         link.source_signature = signature
         link.build_count += 1
         link.last_build_ms = ms
         link.message = "; ".join(built.messages)
-        link.force_overwrite = False
         _apply(link, "build_ok")
         return engine.BuildResult(key, "ok", link.message, ms)
 
