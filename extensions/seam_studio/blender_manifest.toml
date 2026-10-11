@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+
+id = "seam_studio"
+version = "0.1.0"
+name = "SEAM Studio"
+tagline = "Vector, raster and live 2D-to-3D links in one Blender workspace"
+maintainer = "SEAM Studio contributors"
+type = "add-on"
+tags = ["Interface", "Paint", "Modeling", "Import-Export"]
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Import/export SVG and PNG artwork chosen by the user"

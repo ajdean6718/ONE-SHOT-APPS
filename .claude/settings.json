@@ -1,22 +1,14 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "workflowSizeGuideline": "unrestricted",
+  "worktree": {
+    "baseRef": "head"
+  },
   "extraKnownMarketplaces": {
     "claude-plugins-official": {
       "source": {
         "source": "github",
         "repo": "anthropics/claude-plugins-official"
-      }
-    },
-    "ui-ux-pro-max-skill": {
-      "source": {
-        "source": "github",
-        "repo": "nextlevelbuilder/ui-ux-pro-max-skill"
-      }
-    },
-    "ecc": {
-      "source": {
-        "source": "github",
-        "repo": "affaan-m/everything-claude-code"
       }
     },
     "claude-code-workflows": {
@@ -27,53 +19,50 @@
     }
   },
   "enabledPlugins": {
-    "frontend-design@claude-plugins-official": true,
     "feature-dev@claude-plugins-official": true,
     "superpowers@claude-plugins-official": true,
-    "ui-ux-pro-max@ui-ux-pro-max-skill": true,
-    "ecc@ecc": true,
-    "javascript-typescript@claude-code-workflows": true,
-    "frontend-mobile-development@claude-code-workflows": true,
-    "backend-development@claude-code-workflows": true,
-    "full-stack-orchestration@claude-code-workflows": true,
-    "developer-essentials@claude-code-workflows": true,
+    "python-development@claude-code-workflows": true,
     "unit-testing@claude-code-workflows": true,
     "tdd-workflows@claude-code-workflows": true,
-    "security-scanning@claude-code-workflows": true,
-    "api-scaffolding@claude-code-workflows": true,
-    "database-design@claude-code-workflows": true,
-    "ui-design@claude-code-workflows": true,
-    "git-pr-workflows@claude-code-workflows": true,
     "debugging-toolkit@claude-code-workflows": true,
-    "comprehensive-review@claude-code-workflows": true,
-    "cicd-automation@claude-code-workflows": true,
-    "deployment-strategies@claude-code-workflows": true,
-    "accessibility-compliance@claude-code-workflows": true,
-    "python-development@claude-code-workflows": true,
-    "payment-processing@claude-code-workflows": true,
-    "application-performance@claude-code-workflows": true,
-    "code-refactoring@claude-code-workflows": true,
     "error-debugging@claude-code-workflows": true,
+    "code-refactoring@claude-code-workflows": true,
+    "application-performance@claude-code-workflows": true,
+    "comprehensive-review@claude-code-workflows": true,
     "documentation-generation@claude-code-workflows": true,
-    "llm-application-dev@claude-code-workflows": true,
-    "agent-orchestration@claude-code-workflows": true,
-    "multi-platform-apps@claude-code-workflows": true,
-    "context-management@claude-code-workflows": true
+    "accessibility-compliance@claude-code-workflows": true,
+    "developer-essentials@claude-code-workflows": true,
+    "frontend-design@claude-plugins-official": false,
+    "ui-ux-pro-max@ui-ux-pro-max-skill": false,
+    "ecc@ecc": false,
+    "javascript-typescript@claude-code-workflows": false,
+    "frontend-mobile-development@claude-code-workflows": false,
+    "backend-development@claude-code-workflows": false,
+    "full-stack-orchestration@claude-code-workflows": false,
+    "security-scanning@claude-code-workflows": false,
+    "api-scaffolding@claude-code-workflows": false,
+    "database-design@claude-code-workflows": false,
+    "ui-design@claude-code-workflows": false,
+    "git-pr-workflows@claude-code-workflows": false,
+    "cicd-automation@claude-code-workflows": false,
+    "deployment-strategies@claude-code-workflows": false,
+    "payment-processing@claude-code-workflows": false,
+    "llm-application-dev@claude-code-workflows": false,
+    "agent-orchestration@claude-code-workflows": false,
+    "multi-platform-apps@claude-code-workflows": false,
+    "context-management@claude-code-workflows": false
   },
   "enableAllProjectMcpServers": true,
   "env": {
     "CLAUDE_CODE_PLUGIN_DIRS": "/home/user/ONE-SHOT-APPS/.claude/mods/agent-ctx:/home/user/ONE-SHOT-APPS/.claude/mods/context-band:/home/user/ONE-SHOT-APPS/.claude/mods/loop-guard:/home/user/ONE-SHOT-APPS/.claude/mods/spawn-ledger:/home/user/ONE-SHOT-APPS/.claude/mods/voice-compact",
-    "AGENCY_HOME": "/home/user/ONE-SHOT-APPS/.claude"
+    "AGENCY_HOME": "/home/user/ONE-SHOT-APPS/.claude",
+    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "2"
   },
   "hooks": {
     "PreToolUse": [
       {
         "matcher": "Edit|Write",
         "hooks": [
-          {
-            "type": "command",
-            "command": "bash /home/user/ONE-SHOT-APPS/.claude/hooks/gate-guard.sh"
-          },
           {
             "type": "command",
             "command": "bash /home/user/ONE-SHOT-APPS/.claude/hooks/config-protection.sh"
@@ -101,28 +90,6 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash /home/user/ONE-SHOT-APPS/.claude/hooks/track-edits.sh"
-          },
-          {
-            "type": "command",
-            "command": "bash /home/user/ONE-SHOT-APPS/.claude/hooks/write-evidence.sh"
-          }
-        ]
-      },
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash /home/user/ONE-SHOT-APPS/.claude/hooks/loop-detector.sh"
-          }
-        ]
-      },
-      {
         "matcher": "Agent",
         "hooks": [
           {
@@ -136,10 +103,6 @@
       {
         "matcher": "",
         "hooks": [
-          {
-            "type": "command",
-            "command": "bash /home/user/ONE-SHOT-APPS/.claude/hooks/startup-sync.sh"
-          },
           {
             "type": "command",
             "command": "bash /home/user/ONE-SHOT-APPS/.claude/hooks/check-settings-secrets.sh"
@@ -157,7 +120,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash /home/user/ONE-SHOT-APPS/.claude/hooks/session-end.sh && bash /home/user/ONE-SHOT-APPS/.claude/hooks/batch-check.sh && bash /home/user/ONE-SHOT-APPS/.claude/hooks/cost-tracker.sh"
+            "command": "bash /home/user/ONE-SHOT-APPS/.claude/hooks/session-end.sh && bash /home/user/ONE-SHOT-APPS/.claude/hooks/cost-tracker.sh"
           }
         ]
       }

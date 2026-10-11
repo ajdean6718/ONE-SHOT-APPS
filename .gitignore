@@ -11,3 +11,10 @@ __pycache__/
 .claude/sessions/
 .claude/memory/
 .claude/projects/
+# SEAM Studio build outputs
+artifacts/
+dist/
+.seam-profile/
+*.blend1
+*.blend@
+.pytest_cache/

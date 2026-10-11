@@ -1,0 +1,18 @@
+{
+  "updated": "2026-10-11T00:45Z",
+  "phase": "wave1-implementation",
+  "integration_branch": "claude/nice-carson-jivgmv",
+  "foundation": "contracts, engine, bridge, canvas foundation, test harness committed",
+  "runtimes": {"gui": "blender 4.0.2 (apt)", "lts_headless": "bpy 5.2.2 LTS venv /opt/seam-cache/venv-bpy52"},
+  "workstreams": {
+    "core-geometry": {"packet": "docs/tasks/core-geometry.md", "branch": "seam/core-geometry", "status": "pending"},
+    "core-raster-io": {"packet": "docs/tasks/core-raster-io.md", "branch": "seam/core-raster-io", "status": "pending"},
+    "link": {"packet": "docs/tasks/link.md", "branch": "seam/link", "status": "pending"},
+    "vector-a": {"packet": "docs/tasks/vector-a.md", "branch": "seam/vector-a", "status": "pending"},
+    "vector-b": {"packet": "docs/tasks/vector-b.md", "branch": "seam/vector-b", "status": "pending"},
+    "paint": {"packet": "docs/tasks/paint.md", "branch": "seam/paint", "status": "pending"},
+    "shell": {"packet": "docs/tasks/shell.md", "branch": "seam/shell", "status": "pending"}
+  },
+  "next": ["merge wave1 in dependency order", "wave2: decal + split UX + acceptance + GUI scenarios + review"],
+  "blockers": []
+}
