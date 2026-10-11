@@ -8,7 +8,7 @@ from accsupport import (assert_link_consistent, extent, flush, make_3d, mesh_np,
                         op, save_and_reopen, select)
 
 
-def setup(recipe="EXTRUDE", **params):
+def build_link(recipe="EXTRUDE", **params):
     new_canvas(1000, 800)
     op(bpy.ops.seam.add_shape, kind="RECT", x=300, y=-300, width=200, height=200)
     src = bpy.context.active_object
@@ -28,7 +28,7 @@ def fresh_copy(src, recipe="EXTRUDE", **params):
 
 
 def test_pause_edit_resume_is_correct(seam, engine):
-    src, link = setup()
+    src, link = build_link()
     tgt = link.target
     select(tgt)
     op(bpy.ops.seam.link_pause)
@@ -68,7 +68,7 @@ def test_pause_edit_resume_is_correct(seam, engine):
 
 
 def test_pause_then_undoing_the_edit_resumes_cleanly(seam, engine):
-    src, link = setup()
+    src, link = build_link()
     select(link.target)
     op(bpy.ops.seam.link_pause)
     co = mesh_np(link.target).copy()
@@ -82,7 +82,7 @@ def test_pause_then_undoing_the_edit_resumes_cleanly(seam, engine):
 
 
 def test_paused_state_survives_save_and_reopen(seam, engine, blend_path):
-    src, link = setup()
+    src, link = build_link()
     link_id, src_name, tgt_name = link.id, src.name, link.target.name
     select(link.target)
     op(bpy.ops.seam.link_pause)
@@ -101,7 +101,7 @@ def test_paused_state_survives_save_and_reopen(seam, engine, blend_path):
 
 
 def test_detach_freezes_the_result(seam, engine):
-    src, link = setup()
+    src, link = build_link()
     tgt = link.target
     select(tgt)                                                                      # modifier work must survive detach
     assert bpy.ops.object.modifier_add(type="SOLIDIFY") == {"FINISHED"}
@@ -136,7 +136,7 @@ def test_detach_freezes_the_result(seam, engine):
 
 
 def test_detach_while_paused_keeps_the_last_applied_geometry(seam, engine):
-    src, link = setup()
+    src, link = build_link()
     tgt = link.target
     select(tgt)
     op(bpy.ops.seam.link_pause)
@@ -149,7 +149,7 @@ def test_detach_while_paused_keeps_the_last_applied_geometry(seam, engine):
 
 
 def test_deleting_the_source_after_detach_is_harmless(seam, engine):
-    src, link = setup()
+    src, link = build_link()
     tgt = link.target
     baked = mesh_np(tgt).copy()
     select(tgt)
