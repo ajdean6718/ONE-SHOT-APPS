@@ -8,7 +8,7 @@ from __future__ import annotations
 import bpy
 
 from ..seam_core import links as L
-from . import ops, recipes
+from . import decal, ops, recipes
 
 STATE_ICONS = {
     "LIVE": "LINKED",
@@ -26,7 +26,8 @@ STATE_LABELS = {
     "CONFLICT": "Conflict",
     "MISSING_SOURCE": "Missing Source",
 }
-RECIPE_ICONS = {"EXTRUDE": "MOD_SOLIDIFY", "REVOLVE": "MOD_SCREW", "SWEEP": "MOD_CURVE", "TEXT3D": "OUTLINER_OB_FONT"}
+RECIPE_ICONS = {"EXTRUDE": "MOD_SOLIDIFY", "REVOLVE": "MOD_SCREW", "SWEEP": "MOD_CURVE", "TEXT3D": "OUTLINER_OB_FONT",
+                "DECAL": "TEXTURE"}
 
 
 def state_icon(link) -> str:
@@ -89,6 +90,19 @@ class _SeamPanel:
         return getattr(context.scene, "seam", None) is not None
 
 
+def decal_availability(context):
+    """{"PLANE": (ok, why), "MATERIAL": (ok, why)} for the current selection (why = requirement text)."""
+    src, tgt = ops.pick_decal_pair(context)
+    if src is None:
+        why = "Decal needs a vector shape, text, group or raster layer"
+        return {"PLANE": (False, why), "MATERIAL": (False, why)}
+    ok, why = recipes.source_ok("DECAL", src)
+    if not ok:
+        return {"PLANE": (False, why), "MATERIAL": (False, why)}
+    problem = ops.material_decal_problem(src, tgt)
+    return {"PLANE": (True, ""), "MATERIAL": (not problem, problem)}
+
+
 class SEAM_PT_make_3d(_SeamPanel, bpy.types.Panel):
     bl_label = "Make 3D"
     bl_idname = "SEAM_PT_make_3d"
@@ -100,12 +114,25 @@ class SEAM_PT_make_3d(_SeamPanel, bpy.types.Panel):
             layout.label(text="Select a shape or text to make 3D", icon="INFO")
             return
         col = layout.column(align=True)
-        for recipe in recipes.EXPOSED_RECIPES:
+        for recipe in recipes.MESH_RECIPES:
             ok, why = recipes.source_ok(recipe, obj)
             row = col.row(align=True)
             row.enabled = ok
             op = row.operator("seam.make_3d", text=L.RECIPE_LABELS[recipe], icon=RECIPE_ICONS.get(recipe, "NONE"))
             op.recipe = recipe
+            if not ok:
+                sub = col.row()
+                sub.enabled = False
+                sub.label(text=why, icon="BLANK1")
+        avail = decal_availability(context)
+        col.separator()
+        for mode, text in (("PLANE", "Decal (Plane)"), ("MATERIAL", "Decal (Material)")):
+            ok, why = avail[mode]
+            row = col.row(align=True)
+            row.enabled = ok
+            op = row.operator("seam.make_3d", text=text, icon=RECIPE_ICONS["DECAL"])
+            op.recipe = "DECAL"
+            op.decal_mode = mode
             if not ok:
                 sub = col.row()
                 sub.enabled = False
@@ -174,8 +201,31 @@ class SEAM_PT_live_link(_SeamPanel, bpy.types.Panel):
         params.label(text="%s Settings" % L.RECIPE_LABELS.get(link.recipe, link.recipe), icon="PREFERENCES")
         params.use_property_split = True
         params.enabled = link.state != "DETACHED"
-        for k in L.RECIPE_PARAMS[link.recipe]:
+        for k in param_keys(link):
             params.prop(link.params, k)
+        if link.recipe == "DECAL":
+            params.label(text="Mode: %s" % ("Plane" if decal.mode_of(link) == "PLANE" else "Material (mesh untouched)"),
+                         icon="MESH_PLANE" if decal.mode_of(link) == "PLANE" else "MATERIAL")
+            if decal.src_is_raster(link):
+                params.label(text="Raster layers share the document composite", icon="INFO")
+
+        paint = layout.column(align=True)
+        paint.operator("seam.result_paint_setup", text="Paint on Result", icon="BRUSH_DATA")
+        wm = context.window_manager
+        if hasattr(wm, "seam_sync_link_selection"):
+            paint.prop(wm, "seam_sync_link_selection", text="Sync Link Selection")
+
+
+def param_keys(link):
+    """Parameters worth showing for ``link`` (a decal shows only what its mode uses)."""
+    keys = list(L.RECIPE_PARAMS[link.recipe])
+    if link.recipe == "DECAL":
+        keys = [k for k in keys if k != "decal_mode"]
+        if decal.mode_of(link) == "MATERIAL":
+            keys = [k for k in keys if k not in ("units_scale", "orientation")]
+        if decal.src_is_raster(link):
+            keys = [k for k in keys if k != "decal_resolution"]
+    return keys
 
 
 def _wrap(text: str, width: int):

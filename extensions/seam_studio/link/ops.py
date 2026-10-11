@@ -12,7 +12,7 @@ from .. import ids
 from ..engine import core as engine
 from ..seam_core import links as L
 from ..seam_core.ids import new_id
-from . import producer, recipes
+from . import decal, producer, recipes, resultpaint
 
 RESULT_SPACING = 2.5
 SIDE_SHADE = 0.65
@@ -130,21 +130,42 @@ def count_results(scene) -> int:
     return sum(1 for ob in scene.objects if ob.seam.role == "RESULT")
 
 
-def create_link(context, source, recipe: str, params: dict) -> Tuple[object, object]:
-    """Create the target mesh object + link record for ``source``; does not build."""
+def create_link(context, source, recipe: str, params: dict, target=None) -> Tuple[object, object]:
+    """Create the target mesh object + link record for ``source``; does not build.
+
+    ``target`` is only used by ``DECAL`` with ``decal_mode == 'MATERIAL'``: the existing mesh object that
+    receives the SEAM material slot (it is never rewritten and never owned by the link)."""
     from ..vector import canvas
     scene = context.scene
     params = L.validate_params(recipe, params)
+    material_decal = recipe == "DECAL" and target is not None
+    if recipe == "DECAL":
+        params["decal_mode"] = "MATERIAL" if material_decal else "PLANE"
     link_id = new_id()
     label = L.RECIPE_LABELS.get(recipe, recipe.title())
     name = "%s · %s" % (source.name, label)
+    if material_decal:
+        link = scene.seam.links.add()
+        link.id = link_id
+        link.name = name
+        link.recipe = recipe
+        link.source = source
+        link.source_id = ids.ensure_id(source)
+        link.target = target
+        link.target_id = ids.ensure_id(target)
+        for k, v in params.items():
+            setattr(link.params, k, v)
+        link.state = "LIVE"
+        set_active_link(scene, link)
+        return link, target
     me = bpy.data.meshes.new(name)
-    rgba = tuple(source.seam.style.fill_color) if params.get("use_source_material", True) else (0.8, 0.8, 0.8, 1.0)
-    me.materials.append(new_link_material("Face", link_id, "FACE", rgba))
-    me.materials.append(new_link_material("Side", link_id, "SIDE", rgba))
-    if not params.get("use_source_material", True):
-        for m in me.materials:
-            m["seam_link_id"] = ""  # user-owned colours: never synced
+    if recipe != "DECAL":
+        rgba = tuple(source.seam.style.fill_color) if params.get("use_source_material", True) else (0.8, 0.8, 0.8, 1.0)
+        me.materials.append(new_link_material("Face", link_id, "FACE", rgba))
+        me.materials.append(new_link_material("Side", link_id, "SIDE", rgba))
+        if not params.get("use_source_material", True):
+            for m in me.materials:
+                m["seam_link_id"] = ""  # user-owned colours: never synced
     target = bpy.data.objects.new(name, me)
     target.location = (RESULT_SPACING * count_results(scene), 0.0, 0.0)
     canvas.results_collection(scene).objects.link(target)
@@ -163,6 +184,8 @@ def create_link(context, source, recipe: str, params: dict) -> Tuple[object, obj
         setattr(link.params, k, v)
     link.state = "LIVE"
     set_active_link(scene, link)
+    if recipe == "DECAL":
+        decal.ensure_material(link)
     return link, target
 
 
@@ -252,6 +275,11 @@ class _LinkParamsMixin:
     sweep_profile_resolution: _i("sweep_profile_resolution", "Profile Segments")
     fill_caps: BoolProperty(name="Fill Caps", default=True)
     use_source_material: BoolProperty(name="Use Source Colour", default=True)
+    decal_mode: EnumProperty(name="Decal Mode", items=[
+        ("PLANE", "Plane", "Create a plane mesh that shows the artwork"),
+        ("MATERIAL", "Material", "Add a SEAM material slot to the selected mesh (never rewrites its geometry)"),
+    ], default="PLANE")
+    decal_resolution: _i("decal_resolution", "Texture Size")
 
     def collect_params(self, recipe: str) -> dict:
         return {k: getattr(self, k) for k in L.RECIPE_PARAMS[recipe] if hasattr(self, k)}
@@ -302,8 +330,51 @@ class _LinkOp:
 
 # ------------------------------------------------------------------ operators
 
+ARTWORK_ROLES = ("SHAPE", "TEXT", "RASTER", "GROUP", "ARTBOARD", "GUIDE", "STROKE", "OUTLINE", "CLIP_RESULT",
+                 "INTERNAL", "CANVAS_ROOT")
+
+
+def is_decal_source(obj) -> bool:
+    return obj is not None and obj.seam.role in L.SOURCE_ROLES["DECAL"]
+
+
+def is_material_target(obj, exclude=None) -> bool:
+    """A mesh object a Material decal may be added to (any non-artwork mesh, including 3D results)."""
+    return obj is not None and obj.type == "MESH" and obj.seam.role not in ARTWORK_ROLES and obj != exclude
+
+
+def pick_decal_pair(context, source_name: str = "", target_name: str = ""):
+    """(source, target-or-None) for a decal from explicit names or the selection (active first)."""
+    act = context.active_object
+    sel = list(context.selected_objects)
+    src = bpy.data.objects.get(source_name) if source_name else None
+    if src is None:
+        for o in ([act] if act is not None else []) + sel:
+            if is_decal_source(o):
+                src = o
+                break
+    tgt = bpy.data.objects.get(target_name) if target_name else None
+    if tgt is None:
+        for o in ([act] if act is not None else []) + sel:
+            if is_material_target(o, src):
+                tgt = o
+                break
+    return src, tgt
+
+
+def material_decal_problem(src, tgt) -> str:
+    """Why a Material decal cannot be created (empty = fine)."""
+    if tgt is None:
+        return "Material decals need a selected mesh object to receive the material"
+    if tgt.data is None or not len(tgt.data.uv_layers):
+        return "'%s' has no UV map: unwrap it first (UV Editing workspace)" % tgt.name
+    if tgt.library is not None or tgt.data.library is not None:
+        return "'%s' is linked from a library and cannot get a material slot" % tgt.name
+    return ""
+
+
 class SEAM_OT_make_3d(_LinkParamsMixin, bpy.types.Operator):
-    """Create a live 3D result from the active shape or text"""
+    """Create a live 3D result (or a live decal) from the active shape, text, group or raster layer"""
 
     bl_idname = "seam.make_3d"
     bl_label = "Make 3D"
@@ -314,9 +385,15 @@ class SEAM_OT_make_3d(_LinkParamsMixin, bpy.types.Operator):
         ("REVOLVE", "Revolve", "Lathe the path around a vertical axis"),
         ("SWEEP", "Sweep", "Sweep a profile along the path"),
         ("TEXT3D", "Text 3D", "Extrude text outlines"),
+        ("DECAL", "Decal", "Show the artwork or raster layer as a live texture on a plane or a mesh material"),
     ], default="EXTRUDE")
     source_name: StringProperty(name="Source", default="", options={"SKIP_SAVE"},
                                 description="Source object name (default: active object)")
+    target_name: StringProperty(name="Target Mesh", default="", options={"SKIP_SAVE"},
+                                description="Material decal: mesh that receives the material (default: selected mesh)")
+    assign_faces: BoolProperty(name="Assign To All Faces", default=True,
+                               description="Material decal: put every face of the mesh on the new SEAM material slot "
+                                           "(a one-time step; the live link itself never edits the mesh)")
 
     @classmethod
     def poll(cls, context):
@@ -324,15 +401,19 @@ class SEAM_OT_make_3d(_LinkParamsMixin, bpy.types.Operator):
             return False
         obj = context.active_object
         if obj is None:
-            cls.poll_message_set("Select a vector shape or text object")
+            cls.poll_message_set("Select a vector shape, text, group or raster layer")
             return False
         if obj.seam.role in L.DERIVED_ROLES:
             cls.poll_message_set("Generated objects cannot be used as a source")
             return False
-        if obj.seam.role not in ("SHAPE", "TEXT"):
-            cls.poll_message_set("Make 3D needs a SEAM vector shape or text object")
-            return False
-        return True
+        if obj.seam.role in ("SHAPE", "TEXT", "RASTER", "GROUP"):
+            return True
+        # a plain mesh can be the *target* of a Material decal when artwork is selected next to it
+        if obj.type == "MESH" and any(is_decal_source(o) for o in context.selected_objects):
+            return True
+        cls.poll_message_set("Make 3D needs a SEAM vector shape, text, group or raster layer "
+                             "(a Material decal also needs the mesh selected)")
+        return False
 
     def draw(self, context):
         layout = self.layout
@@ -340,13 +421,36 @@ class SEAM_OT_make_3d(_LinkParamsMixin, bpy.types.Operator):
         layout.prop(self, "recipe")
         self.draw_params(layout, self.recipe)
 
+    def draw_params(self, layout, recipe: str) -> None:
+        keys = list(L.RECIPE_PARAMS[recipe])
+        if recipe == "DECAL" and self.decal_mode == "MATERIAL":
+            keys = [k for k in keys if k not in ("units_scale", "orientation")]
+        for k in keys:
+            if hasattr(self, k):
+                layout.prop(self, k)
+        if recipe == "DECAL" and self.decal_mode == "MATERIAL":
+            layout.prop(self, "assign_faces")
+
     def execute(self, context):
         scene = context.scene
-        src = bpy.data.objects.get(self.source_name) if self.source_name else context.active_object
+        material_decal = self.recipe == "DECAL" and self.decal_mode == "MATERIAL"
+        if self.recipe == "DECAL":
+            src, tgt = pick_decal_pair(context, self.source_name, self.target_name)
+        else:
+            src, tgt = (bpy.data.objects.get(self.source_name) if self.source_name else context.active_object), None
         ok, why = recipes.source_ok(self.recipe, src)
         if not ok:
             self.report({"ERROR"}, why)
             return {"CANCELLED"}
+        if material_decal:
+            problem = material_decal_problem(src, tgt)
+            if problem:
+                self.report({"ERROR"}, problem)
+                return {"CANCELLED"}
+            edges = [(lk.source_id, lk.target_id) for lk in scene.seam.links]
+            if L.would_create_cycle(edges, ids.ensure_id(src), ids.ensure_id(tgt)):
+                self.report({"ERROR"}, "That mesh depends on this source (cycle)")
+                return {"CANCELLED"}
         params = L.default_params(self.recipe)
         params.update(self.collect_params(self.recipe))
         try:
@@ -354,7 +458,11 @@ class SEAM_OT_make_3d(_LinkParamsMixin, bpy.types.Operator):
         except ValueError as exc:
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-        link, _target = create_link(context, src, self.recipe, params)
+        link, _target = create_link(context, src, self.recipe, params, target=tgt if material_decal else None)
+        if material_decal:
+            decal.ensure_material(link)
+            if self.assign_faces:
+                decal.assign_faces(link)
         res = rebuild_now(scene, link)
         _report_build(self, link, res)
         if res is not None and res.status == "ok":
@@ -432,6 +540,9 @@ class SEAM_OT_link_overwrite(_LinkOp, bpy.types.Operator):
         if link.target is None or link.source is None:
             cls.poll_message_set("Source or result missing")
             return False
+        if link.recipe == "DECAL" and not decal.owns_target_object(link):
+            cls.poll_message_set("A material decal never edits the mesh, so there is nothing to overwrite or branch")
+            return False
         return True
 
     def execute(self, context):
@@ -461,6 +572,9 @@ class SEAM_OT_link_branch(_LinkOp, bpy.types.Operator):
     def extra_poll(cls, context, link):
         if link.target is None or link.source is None:
             cls.poll_message_set("Source or result missing")
+            return False
+        if link.recipe == "DECAL" and not decal.owns_target_object(link):
+            cls.poll_message_set("A material decal never edits the mesh, so there is nothing to overwrite or branch")
             return False
         return True
 
@@ -590,13 +704,19 @@ class SEAM_OT_link_remove(_LinkOp, bpy.types.Operator):
 def remove_link(scene, link, delete_result: bool = False) -> None:
     tgt = link.target
     link_id = link.id
+    is_decal = link.recipe == "DECAL"
+    owns_target = (not is_decal) or decal.owns_target_object(link)
     links = scene.seam.links
     idx = next(i for i, lk in enumerate(links) if lk.id == link_id)
+    if is_decal and tgt is not None and not owns_target:
+        decal.remove_owned_slots(link)  # a Material decal gives the user's mesh its slot back
     links.remove(idx)
+    if is_decal:
+        decal.forget(link_id)
     scene.seam.active_link_index = max(0, min(scene.seam.active_link_index, len(links) - 1))
-    if tgt is not None:
+    if tgt is not None and owns_target:
         if delete_result:
-            bpy.data.objects.remove(tgt, do_unlink=True)
+            bpy.data.objects.remove(tgt, do_unlink=True)  # only ever the object the link created
         else:
             if tgt.seam.owner_id == link_id:
                 tgt.seam.role = "NONE"
@@ -688,6 +808,9 @@ class SEAM_OT_duplicate_result(_LinkOp, bpy.types.Operator):
         if link.source is None:
             cls.poll_message_set("The source is missing")
             return False
+        if link.recipe == "DECAL" and not decal.owns_target_object(link):
+            cls.poll_message_set("Duplicate needs a plane decal; a material decal belongs to one mesh")
+            return False
         return True
 
     def execute(self, context):
@@ -700,8 +823,62 @@ class SEAM_OT_duplicate_result(_LinkOp, bpy.types.Operator):
         return {"FINISHED"}
 
 
+class SEAM_OT_result_paint_setup(bpy.types.Operator):
+    """Prepare the active mesh (typically a 3D result) for native Texture Paint: UV map, a SEAM paint image
+mixed over the existing base colour, and an active paint slot. Painted texels follow the (deterministic)
+UVs, so they survive source edits; if the source changes topology they stay at their UV position"""
+
+    bl_idname = "seam.result_paint_setup"
+    bl_label = "Paint on Result"
+    bl_options = {"REGISTER", "UNDO"}
+
+    size: IntProperty(name="Texture Size", default=1024, min=16, max=8192,
+                      description="Width and height of the new paint image (reused when it exists)")
+    enter_paint: BoolProperty(name="Enter Texture Paint", default=True,
+                              description="Switch to Texture Paint mode after the setup")
+    object_name: StringProperty(name="Object", default="", options={"SKIP_SAVE"},
+                                description="Mesh object name (default: active object)")
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        if obj is None:
+            cls.poll_message_set("Select a 3D result or any mesh object to paint on")
+            return False
+        if obj.type != "MESH" or obj.seam.role in ARTWORK_ROLES:
+            cls.poll_message_set("Paint on Result needs a mesh object (a 3D result), not 2D artwork")
+            return False
+        if obj.library is not None or obj.data.library is not None:
+            cls.poll_message_set("Linked library objects cannot be painted")
+            return False
+        return True
+
+    def execute(self, context):
+        obj = bpy.data.objects.get(self.object_name) if self.object_name else context.active_object
+        if obj is None or obj.type != "MESH" or obj.seam.role in ARTWORK_ROLES:
+            self.report({"ERROR"}, "Paint on Result needs a mesh object")
+            return {"CANCELLED"}
+        busy = producer.target_busy_mode(obj)
+        if busy and busy != "Texture Paint Mode":
+            try:
+                bpy.ops.object.mode_set(mode="OBJECT")
+            except RuntimeError:
+                self.report({"ERROR"}, "Leave %s first" % busy)
+                return {"CANCELLED"}
+        info = resultpaint.setup(obj, self.size)
+        msg = "Paint image '%s' on %d material(s), UV map '%s'" % (info["image"].name, len(info["materials"]),
+                                                                    info["uv_map"])
+        self.report({"INFO"}, msg)
+        if self.enter_paint:
+            err = resultpaint.enter_texture_paint(context, obj)
+            if err:
+                self.report({"WARNING"}, "Set up, but Texture Paint mode was not entered: %s" % err)
+        return {"FINISHED"}
+
+
 classes = (
     SEAM_OT_make_3d,
+    SEAM_OT_result_paint_setup,
     SEAM_OT_link_pause,
     SEAM_OT_link_resume,
     SEAM_OT_link_detach,

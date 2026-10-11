@@ -3,7 +3,7 @@
 EXTRUDE / SWEEP / TEXT3D are evaluated natively: the source paths (in the link's SHAPE2D
 frame, scaled to metres) are written into a temporary *unlinked* Curve object and converted
 with ``Object.to_mesh()`` (holes, bevels and caps for free; identical on 4.0 and 5.2).
-REVOLVE uses ``seam_core.mesh.revolve``. DECAL is not part of this wave.
+REVOLVE uses ``seam_core.mesh.revolve``. DECAL is built by ``decal.py`` (image + plane / material), not here.
 
 Every builder returns a :class:`Built` in the final object frame (orientation and origin
 applied, metres). Invalid input raises :class:`RecipeError` (the link goes to ERROR and the
@@ -25,7 +25,9 @@ from ..seam_core.geometry import Affine, BezierPath, BezierPoint
 
 classes = ()
 
-EXPOSED_RECIPES = ("EXTRUDE", "REVOLVE", "SWEEP", "TEXT3D")  # DECAL: not in this wave
+EXPOSED_RECIPES = ("EXTRUDE", "REVOLVE", "SWEEP", "TEXT3D", "DECAL")
+MESH_RECIPES = ("EXTRUDE", "REVOLVE", "SWEEP", "TEXT3D")  # built here (DECAL: see decal.py)
+DECAL_SOURCE_TYPES = {"SHAPE": "CURVE", "TEXT": "FONT", "GROUP": "EMPTY", "RASTER": "MESH"}
 MAT_FACE = 0
 MAT_SIDE = 1
 TMP_NAME = "SEAM tmp link"
@@ -581,25 +583,78 @@ def build_revolve(paths: Sequence[BezierPath], params: dict, mirrored: bool = Fa
     return _finish("REVOLVE", params, verts, totals, corners, mats, uvs, messages)
 
 
+def box_uvs(verts: np.ndarray, totals: np.ndarray, corners: np.ndarray) -> np.ndarray:
+    """Deterministic per-corner UVs by box projection into a 3 x 2 atlas (one cell per axis and sign).
+
+    Every face goes to the cell of its dominant normal axis/direction and is projected along that axis, all
+    cells share one scale (mesh bounding box). UVs depend only on vertex positions and face winding, never on
+    vertex numbering, so texels painted on a result stay in place when the source changes topology (they
+    follow the surface, not the indices)."""
+    verts = np.asarray(verts, dtype=np.float64).reshape(-1, 3)
+    totals = np.asarray(totals, dtype=np.int64)
+    corners = np.asarray(corners, dtype=np.int64)
+    nl = len(corners)
+    out = np.zeros((nl, 2), dtype=np.float32)
+    if not nl or not len(totals):
+        return out
+    lo = verts.min(axis=0)
+    span = float(max((verts.max(axis=0) - lo).max(), 1e-9))
+    face_of = np.repeat(np.arange(len(totals)), totals)
+    p = verts[corners]
+    # Newell normal per face
+    starts = np.zeros(len(totals), dtype=np.int64)
+    np.cumsum(totals[:-1], out=starts[1:])
+    idx = np.arange(nl)
+    nxt_idx = idx + 1
+    ends = starts + totals - 1
+    nxt_idx[ends] = starts
+    nxt = p[nxt_idx]
+    nx = (p[:, 1] - nxt[:, 1]) * (p[:, 2] + nxt[:, 2])
+    ny = (p[:, 2] - nxt[:, 2]) * (p[:, 0] + nxt[:, 0])
+    nz = (p[:, 0] - nxt[:, 0]) * (p[:, 1] + nxt[:, 1])
+    n = np.stack([np.bincount(face_of, weights=w, minlength=len(totals)) for w in (nx, ny, nz)], axis=1)
+    axis = np.argmax(np.abs(n), axis=1)
+    sign = np.take_along_axis(n, axis[:, None], axis=1)[:, 0] >= 0
+    # (u axis, v axis) per projection axis; the negative side mirrors u so the view from outside reads correctly
+    uax = np.array([1, 0, 0])[axis]
+    vax = np.array([2, 2, 1])[axis]
+    rel = (p - lo) / span
+    cu = rel[idx, uax[face_of]]
+    cv = rel[idx, vax[face_of]]
+    cu = np.where(sign[face_of], cu, 1.0 - cu)
+    cell_x = axis[face_of].astype(np.float64)
+    cell_y = np.where(sign[face_of], 0.0, 1.0)
+    pad = 0.02
+    out[:, 0] = ((cell_x + pad + cu * (1.0 - 2 * pad)) / 3.0).astype(np.float32)
+    out[:, 1] = ((cell_y + pad + cv * (1.0 - 2 * pad)) / 2.0).astype(np.float32)
+    return out
+
+
 def build(recipe: str, paths: Sequence[BezierPath], params: dict, mirrored: bool = False) -> Built:
     params = L.validate_params(recipe, params)
     params.setdefault("orientation", "UPRIGHT")
     params.setdefault("origin", "BOTTOM")
     params.setdefault("fill_caps", True)
     if recipe == "EXTRUDE":
-        return build_extrude(paths, params, mirrored)
-    if recipe == "TEXT3D":
-        return build_text3d(paths, params, mirrored)
-    if recipe == "SWEEP":
-        return build_sweep(paths, params, mirrored)
-    if recipe == "REVOLVE":
-        return build_revolve(paths, params, mirrored)
-    raise RecipeUnavailable("%s is not available yet" % L.RECIPE_LABELS.get(recipe, recipe))
+        built = build_extrude(paths, params, mirrored)
+    elif recipe == "TEXT3D":
+        built = build_text3d(paths, params, mirrored)
+    elif recipe == "SWEEP":
+        built = build_sweep(paths, params, mirrored)
+    elif recipe == "REVOLVE":
+        built = build_revolve(paths, params, mirrored)
+    else:
+        raise RecipeUnavailable("%s is built from an image, not from paths" % L.RECIPE_LABELS.get(recipe, recipe))
+    if built.uvs is None and len(built.corner_verts):
+        built.uvs = box_uvs(built.verts, built.loop_totals, built.corner_verts)  # every result is paintable
+    return built
 
 
 def recipe_available(recipe: str) -> Tuple[bool, str]:
     if recipe not in EXPOSED_RECIPES:
         return False, "%s is not available yet" % L.RECIPE_LABELS.get(recipe, recipe)
+    if recipe == "DECAL":
+        return True, ""
     if recipe == "REVOLVE" and not revolve_available():
         return False, "Revolve builder not available in this build"
     return True, ""
@@ -615,6 +670,11 @@ def source_ok(recipe: str, obj) -> Tuple[bool, str]:
     ok, why = L.can_link(recipe, obj.seam.role)
     if not ok:
         return ok, why
+    if recipe == "DECAL":
+        want = DECAL_SOURCE_TYPES.get(obj.seam.role, "CURVE")
+        if obj.type != want:
+            return False, "The %s source has an unexpected object type (%s)" % (obj.seam.role.lower(), obj.type)
+        return True, ""
     want = "FONT" if recipe == "TEXT3D" else "CURVE"
     if obj.type != want:
         return False, "%s needs a %s object" % (L.RECIPE_LABELS[recipe], "text" if want == "FONT" else "curve")
