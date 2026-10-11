@@ -456,8 +456,10 @@ def merge_down(doc, index: int):
     """Merge layer ``index`` into the layer below it.
 
     The result keeps the lower layer's name, opacity, blend mode and visibility.  The lower layer's mask is baked
-    into its alpha first; the upper layer contributes with its own opacity, blend mode and mask.  Returns the
-    merged layer."""
+    into its alpha first; the upper layer contributes with its own opacity, blend mode and mask.  The look is
+    preserved exactly (up to 8-bit rounding) when the lower layer is opaque; with partially transparent pixels it
+    is approximate because the composite model of ``seam_core.raster`` is not associative.  Returns the merged
+    layer."""
     _check_index(doc, index)
     if index == 0:
         raise ValueError("no layer below to merge into")
@@ -626,7 +628,7 @@ def new_raster_doc(scene, name: str = "Raster", width: int = 1920, height: int =
     mesh.materials.append(ma)
     doc.material = ma
     build_material(doc)
-    update_composite(doc)
+    engine.mark_dirty(f"rastercache:{doc.id}")  # the composite image is filled by the cache producer
     scene.seam.active_raster_index = n
     return scene.seam.rasters[n]
 
@@ -1180,9 +1182,12 @@ def _on_undo_redo_load(*_args):
     _cache_sigs.clear()
     _fingerprints.clear()
     try:
+        for sc in bpy.data.scenes:
+            for doc in sc.seam.rasters:
+                sync_paint_target(doc)  # the object mode may differ from the one the node selection was made in
         _restart_paint_watch_if_needed()
     except Exception:
-        pass
+        traceback.print_exc()
 
 
 _HANDLERS = (("save_pre", _on_save_pre), ("undo_post", _on_undo_redo_load),

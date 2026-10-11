@@ -5,6 +5,7 @@ exactly what is stored in the layer images / the composite.
 """
 
 import os
+import zlib
 
 import bpy
 import numpy as np
@@ -96,7 +97,7 @@ class SEAM_OT_raster_import_png(bpy.types.Operator):
             return {"CANCELLED"}
         try:
             import_png(doc, path, placement=self.placement)
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, zlib.error) as exc:
             self.report({"ERROR"}, f"Cannot import PNG: {exc}")
             return {"CANCELLED"}
         return {"FINISHED"}
