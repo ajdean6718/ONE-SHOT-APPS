@@ -283,6 +283,18 @@ def _on_load(*_args):
         traceback.print_exc()
 
 
+@bpy.app.handlers.persistent
+def _on_undo_redo(*_args):
+    """Memfile undo restores properties (so the stored signature of a link) but not pixels written from Python:
+    a restored decal image can be blank while its link still reports the matching signature. Forget what the
+    pixels were rendered for; the engine's own undo/redo handler requests a revalidation, so every vector decal
+    rebuilds exactly once."""
+    decal._applied.clear()
+
+
+_UNDO_LISTS = lambda: (bpy.app.handlers.undo_post, bpy.app.handlers.redo_post)  # noqa: E731
+
+
 def register():
     bpy.types.WindowManager.seam_sync_link_selection = BoolProperty(
         name="Sync Link Selection", default=True,
@@ -292,6 +304,9 @@ def register():
     for lst, fn in ((bpy.app.handlers.load_post, _on_load), (bpy.app.handlers.save_pre, _on_save_pre)):
         if fn not in lst:
             lst.append(fn)
+    for lst in _UNDO_LISTS():
+        if _on_undo_redo not in lst:
+            lst.append(_on_undo_redo)
     subscribe_selection_sync()
 
 
@@ -300,6 +315,9 @@ def unregister():
     for lst, fn in ((bpy.app.handlers.load_post, _on_load), (bpy.app.handlers.save_pre, _on_save_pre)):
         while fn in lst:
             lst.remove(fn)
+    for lst in _UNDO_LISTS():
+        while _on_undo_redo in lst:
+            lst.remove(_on_undo_redo)
     unsubscribe_selection_sync()
     try:
         del bpy.types.WindowManager.seam_sync_link_selection

@@ -615,13 +615,16 @@ def box_uvs(verts: np.ndarray, totals: np.ndarray, corners: np.ndarray) -> np.nd
     n = np.stack([np.bincount(face_of, weights=w, minlength=len(totals)) for w in (nx, ny, nz)], axis=1)
     axis = np.argmax(np.abs(n), axis=1)
     sign = np.take_along_axis(n, axis[:, None], axis=1)[:, 0] >= 0
-    # (u axis, v axis) per projection axis; the negative side mirrors u so the view from outside reads correctly
+    # (u axis, v axis) per projection axis (X: Y,Z / Y: X,Z / Z: X,Y); see the handedness note below
     uax = np.array([1, 0, 0])[axis]
     vax = np.array([2, 2, 1])[axis]
     rel = (p - lo) / span
     cu = rel[idx, uax[face_of]]
     cv = rel[idx, vax[face_of]]
-    cu = np.where(sign[face_of], cu, 1.0 - cu)
+    # u x v must point at the viewer: that holds for +X, -Y and +Z faces; the other three mirror u
+    positive = sign[face_of]
+    outward_ok = np.where(axis[face_of] == 1, ~positive, positive)
+    cu = np.where(outward_ok, cu, 1.0 - cu)
     cell_x = axis[face_of].astype(np.float64)
     cell_y = np.where(sign[face_of], 0.0, 1.0)
     pad = 0.02

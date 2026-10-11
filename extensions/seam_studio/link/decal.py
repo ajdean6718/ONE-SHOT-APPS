@@ -18,15 +18,18 @@ Source -> image
     * SHAPE / TEXT / GROUP: the artwork (the object, or every visible SHAPE/TEXT/RASTER descendant of the
       group) is rasterized with ``seam_core.render2d`` over its own canvas bounds into the 8-bit sRGB
       straight-alpha image ``SEAM Decal <source>`` (longer side = ``decal_resolution``, transparent
-      background). Rebuilds rewrite the pixels of the *same* datablock (``Image.scale`` when the size changes).
+      background). Rebuilds rewrite the pixels of the *same* datablock (``Image.scale`` when the size changes). The longer side is
+      capped at ``MAX_RENDER_SIDE`` (4096 px; the renderer works on a float64 canvas) and the link message says so.
     * RASTER: the raster document composite (``doc.composite``, kept current by the paint producer) is shared
       directly, so pixel edits show without any rebuild; ``decal_resolution`` is ignored.
 
 Staleness and undo
     Memfile undo restores properties but not pixels written from Python. The pixels of a vector decal are
     therefore validated by ``_applied`` (link id -> signature the image pixels were rendered for): the
-    producer reports no stored signature while it differs from the link's stored one, so undo/redo/load
-    rebuild exactly once. The image carries ``seam_decal_sig``; after a file load a packed image with a
+    producer reports no stored signature while it differs from the link's stored one. ``_applied`` is cleared
+    by the undo_post / redo_post handlers (lifecycle), because a memfile restore can bring back both the link
+    and its signature together with a blank image; every vector decal then rebuilds exactly once. Load clears
+    it too. The image carries ``seam_decal_sig``; after a file load a packed image with a
     matching property is trusted (no re-render).
 """
 
@@ -52,6 +55,7 @@ ROLE = "DECAL"                     # value of material["seam_material_role"]
 DRAW_ROLES = ("SHAPE", "TEXT", "RASTER")
 SOURCE_ROLES = ("SHAPE", "TEXT", "RASTER", "GROUP")
 SUPERSAMPLE = 3
+MAX_RENDER_SIDE = 4096             # longer side cap of a vector decal (float64 canvas: 4096 px ~ 0.5 GB transient)
 MAX_NAME = 56
 
 _applied: Dict[str, str] = {}      # link id -> signature of the pixels currently in the image
@@ -321,7 +325,10 @@ def render_vector(scene, link, params: dict):
     w, h = bounds[2] - bounds[0], bounds[3] - bounds[1]
     if w <= 1e-9 or h <= 1e-9:
         raise recipes.RecipeError("The source has no area (zero width or height)")
-    pw, ph = image_size(w, h, params["decal_resolution"])
+    want = int(params["decal_resolution"])
+    if want > MAX_RENDER_SIDE:
+        warnings.insert(0, "Decal resolution limited to %d px (requested %d)" % (MAX_RENDER_SIDE, want))
+    pw, ph = image_size(w, h, min(want, MAX_RENDER_SIDE))
     img = render2d.render(items, pw, ph, (bounds[0], bounds[3], bounds[2], bounds[1]), supersample=SUPERSAMPLE)
     return R.to_uint8_srgb(img), bounds, warnings
 

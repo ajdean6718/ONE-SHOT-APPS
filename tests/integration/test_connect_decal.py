@@ -365,13 +365,14 @@ def test_material_decal_never_rewrites_the_target_mesh(engine):
     verts_before = verts(cube).copy()
     mesh_ptr = cube.data.as_pointer()
     select(src, cube)  # source selected, the mesh is active (works in either order)
+    objects_before = len(bpy.context.scene.objects)
     res = bpy.ops.seam.make_3d(recipe="DECAL", decal_mode="MATERIAL", decal_resolution=64)
     assert res == {"FINISHED"}
     link = bpy.context.scene.seam.links[-1]
     assert link.state == "LIVE" and link.recipe == "DECAL", link.message
     assert link.target == cube and link.source == src
     assert cube.seam.role == "NONE"          # the user's mesh is not turned into a result
-    assert len(bpy.context.scene.objects) == 3 or len(bpy.context.scene.objects) >= 3
+    assert len(bpy.context.scene.objects) == objects_before  # a Material decal creates no object
     assert [m.name for m in cube.data.materials] == ["Base", "SEAM Decal"]
     mat = cube.data.materials[1]
     assert mat["seam_link_id"] == link.id and mat.node_tree.nodes["SEAM Decal Image"].image == link.decal_image
@@ -645,3 +646,74 @@ def test_duplicate_and_relink_decal(engine):
     assert bpy.ops.seam.link_relink(source_name=b.name) == {"FINISHED"}
     assert link.source == b and tuple(link.decal_image.size) == (64, 32)
     assert at(link, (300, 0, 400, 50), 350, 25) == srgb8(BLUE)
+
+
+# ------------------------------------------------------------------ review fixes
+
+@pytest.mark.parametrize("mode", ["PLANE", "MATERIAL"])
+def test_undo_create_then_redo_rebuilds_the_pixels(engine, mode):
+    """Memfile undo restores the link (and its signature) but not pixels written from Python."""
+    src = add_rect(bpy.context.scene, "Art", 0, 0, 100, 100, color=RED)
+    cube = add_mesh_with_uv() if mode == "MATERIAL" else None
+    bpy.ops.ed.undo_push(message="base")
+    if mode == "MATERIAL":
+        select(src, cube)
+        assert bpy.ops.seam.make_3d(recipe="DECAL", decal_mode="MATERIAL", decal_resolution=64) == {"FINISHED"}
+    else:
+        make_decal(src, "PLANE", decal_resolution=64)
+    lid = bpy.context.scene.seam.links[-1].id
+    bpy.ops.ed.undo_push(message="created")
+    bpy.ops.ed.undo()
+    flush()
+    assert not any(lk.id == lid for lk in bpy.context.scene.seam.links)
+    bpy.ops.ed.redo()
+    flush()
+    link = next(lk for lk in bpy.context.scene.seam.links if lk.id == lid)
+    assert link.state == "LIVE"
+    assert at(link, (0, 0, 100, 100), 50, 50) == srgb8(RED)
+    assert at(link, (0, 0, 100, 100), 50, 50)[3] == 255
+
+
+def test_undo_of_an_unrelated_step_keeps_decal_pixels(engine):
+    src = add_rect(bpy.context.scene, "Art", 0, 0, 100, 100, color=RED)
+    link = make_decal(src, "PLANE", decal_resolution=64)
+    lid = link.id
+    bpy.ops.ed.undo_push(message="a")
+    bpy.ops.mesh.primitive_cube_add()
+    bpy.ops.ed.undo_push(message="b")
+    bpy.ops.ed.undo()
+    flush()
+    link = next(lk for lk in bpy.context.scene.seam.links if lk.id == lid)
+    assert at(link, (0, 0, 100, 100), 50, 50) == srgb8(RED)
+    bpy.ops.ed.redo()
+    flush()
+    link = next(lk for lk in bpy.context.scene.seam.links if lk.id == lid)
+    assert at(link, (0, 0, 100, 100), 50, 50) == srgb8(RED)
+
+
+def test_vector_decal_resolution_is_capped(engine, monkeypatch):
+    from seam_studio.link import decal
+    monkeypatch.setattr(decal, "MAX_RENDER_SIDE", 48)
+    src = add_rect(bpy.context.scene, "Art", 0, 0, 200, 100, color=RED)
+    link = make_decal(src, "PLANE", decal_resolution=512)
+    assert tuple(link.decal_image.size) == (48, 24)
+    assert "limited to 48" in link.message and "512" in link.message
+
+
+def test_failed_material_decal_leaves_the_mesh_alone(engine):
+    """A source without area cannot be rendered: no SEAM slot, no face reassignment, no dangling link."""
+    src = add_rect(bpy.context.scene, "Art", 0, 0, 100, 100, color=RED)
+    src.seam.style.fill_enabled = False
+    src.seam.style.stroke_enabled = False
+    cube = add_mesh_with_uv()
+    base_mat = bpy.data.materials.new("Base")
+    cube.data.materials.append(base_mat)
+    sig = mesh_sig(cube)
+    n_links = len(bpy.context.scene.seam.links)
+    select(src, cube)
+    with pytest.raises(RuntimeError, match="Material decal not created"):
+        bpy.ops.seam.make_3d(recipe="DECAL", decal_mode="MATERIAL", decal_resolution=64)
+    assert len(bpy.context.scene.seam.links) == n_links
+    assert [m.name for m in cube.data.materials] == ["Base"]
+    assert mesh_sig(cube) == sig
+    assert {p.material_index for p in cube.data.polygons} == {0}

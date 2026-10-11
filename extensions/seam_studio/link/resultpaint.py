@@ -11,6 +11,8 @@
   nothing is painted;
 * makes the paint node the active node of each material, so it is the active texture-paint slot.
 
+Materials that other objects also use are copied first (single-user), so the overlay stays on this object.
+
 Painted texels follow the UVs. Results of a live link are rebuilt with *deterministic* UVs (recipe UVs, or
 the box projection which only depends on vertex positions and face orientation, never on vertex numbering),
 so when the source changes topology the paint stays attached to the surface where the surface still lies at
@@ -78,15 +80,28 @@ def image_name(obj) -> str:
 
 
 def find_paint_image(obj):
-    """The image already wired by :func:`setup`, or None."""
+    """The paint image of ``obj`` already wired by :func:`setup`, or None. Only an image created for this very
+    object counts, so a duplicate (or a material copied from another object) never paints on the original's image."""
+    sid = obj.seam.id
     for m in obj.data.materials:
         if m is None or m.node_tree is None:
             continue
         node = m.node_tree.nodes.get(NODE_IMAGE)
-        if node is not None and node.image is not None:
+        if node is not None and node.image is not None and sid and node.image.get(PAINT_PROP) == sid:
             return node.image
     return None
 
+
+def unshare_materials(obj) -> int:
+    """Give ``obj``'s mesh its own copy of every material that other users also use, so wiring the paint
+    overlay never shows (or paints) on other objects. Returns the number of copies made."""
+    me = obj.data
+    n = 0
+    for i, m in enumerate(me.materials):
+        if m is not None and m.users - (1 if m.use_fake_user else 0) > 1 and m.library is None:
+            me.materials[i] = m.copy()
+            n += 1
+    return n
 
 def new_paint_image(obj, size: int):
     size = max(16, min(8192, int(size)))
@@ -168,6 +183,7 @@ def setup(obj, size: int = 1024):
     created_image = img is None
     if img is None:
         img = new_paint_image(obj, size)
+    unshare_materials(obj)
     mats = paint_materials(obj)
     if not mats:
         mat = bpy.data.materials.new("SEAM Paint")

@@ -319,3 +319,55 @@ def test_material_decal_target_can_be_painted_too(engine):
     art.seam.style.fill_color = (0, 1, 0, 1)
     flush()
     assert link.state == "LIVE" and paint_image_of(cube) == img
+
+
+def test_box_uvs_are_right_handed_from_outside_on_every_axis_and_sign():
+    """u x v must point at a viewer looking at the face from outside (otherwise textures read mirrored)."""
+    from seam_studio.link import recipes
+    for axis in range(3):
+        for sign in (1.0, -1.0):
+            ua, va = [(1, 2), (0, 2), (0, 1)][axis]
+            quad = []
+            for (a, b) in ((0, 0), (1, 0), (1, 1), (0, 1)):  # CCW in (ua, va)
+                p = [0.0, 0.0, 0.0]
+                p[ua], p[va] = float(a), float(b)
+                p[axis] = 0.5 * sign
+                quad.append(p)
+            verts = np.array(quad, dtype=np.float32)
+            n = np.cross(verts[1] - verts[0], verts[2] - verts[1])
+            if np.sign(n[axis]) != sign:  # wind the quad so that the geometric normal is axis * sign
+                verts = verts[::-1].copy()
+                n = np.cross(verts[1] - verts[0], verts[2] - verts[1])
+            assert np.sign(n[axis]) == sign
+            uv = recipes.box_uvs(verts, np.array([4]), np.arange(4))
+            # texture right/up directions in object space from the UV gradient
+            du = np.array([uv[1][0] - uv[0][0], uv[1][1] - uv[0][1]])
+            dv = np.array([uv[2][0] - uv[1][0], uv[2][1] - uv[1][1]])
+            e1, e2 = verts[1] - verts[0], verts[2] - verts[1]
+            M = np.array([du, dv]).T  # solve e = U*r + V*u for the object-space unit vectors of u and v
+            inv = np.linalg.inv(M)
+            ru = e1 * inv[0][0] + e2 * inv[0][1]
+            rv = e1 * inv[1][0] + e2 * inv[1][1]
+            out = np.cross(ru, rv)
+            assert np.sign(out[axis]) == sign, (axis, sign, "mirrored")
+
+
+def test_paint_setup_never_paints_on_materials_shared_with_other_objects(engine):
+    a = add_mesh_with_uv("A", (0, 0, 0))
+    mat = bpy.data.materials.new("Shared")
+    if mat.node_tree is None:
+        mat.use_nodes = True
+    a.data.materials.append(mat)
+    bpy.ops.mesh.primitive_cube_add(location=(4, 0, 0))
+    b = bpy.context.active_object
+    b.data.materials.append(mat)
+    assert mat.users == 2
+    from seam_studio.link import resultpaint
+    resultpaint.setup(a)
+    assert "SEAM Paint Image" not in mat.node_tree.nodes          # the shared material is untouched
+    own = a.data.materials[0]
+    assert own != mat and "SEAM Paint Image" in own.node_tree.nodes
+    assert b.data.materials[0] == mat
+    # b gets its own image, never a's
+    resultpaint.setup(b)
+    assert resultpaint.find_paint_image(a) != resultpaint.find_paint_image(b)

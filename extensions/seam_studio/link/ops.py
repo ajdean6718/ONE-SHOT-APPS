@@ -464,11 +464,17 @@ class SEAM_OT_make_3d(_LinkParamsMixin, bpy.types.Operator):
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         link, _target = create_link(context, src, self.recipe, params, target=tgt if material_decal else None)
+        res = rebuild_now(scene, link)
         if material_decal:
+            if link.state == "ERROR" or (res is not None and res.status == "error"):
+                # nothing was rendered: do not leave the user's mesh on a SEAM slot that shows no image
+                msg = link.message or (res.message if res is not None else "")
+                remove_link(scene, link)
+                self.report({"ERROR"}, "Material decal not created: %s" % msg)
+                return {"CANCELLED"}
             decal.ensure_material(link)
             if self.assign_faces:
                 decal.assign_faces(link)
-        res = rebuild_now(scene, link)
         _report_build(self, link, res)
         if res is not None and res.status == "ok":
             self.report({"INFO"}, "Created %s (live)" % link.name)
