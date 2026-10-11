@@ -100,6 +100,25 @@ def test_png_gradient_stroke_opacity(seam, tmp_path):
     assert pixel(img, 0, 0, 1, 150, -70) == (*srgb8((1.0, 0.5, 0.5)), 255)     # red at 50% over white
 
 
+def test_png_radial_gradient(seam, tmp_path):
+    require(*PNG_KERNELS)
+    setup_artboard()
+    scene = bpy.context.scene
+    g = add_rect(scene, "Radial", 0, -100, 200, 0, color=(1, 1, 1, 1))
+    st = g.seam.style
+    st.fill_type = "RADIAL"
+    st.gradient_center = (0.5, 0.5)
+    st.gradient_radius = 0.5                  # * max(w, h) = 100 px
+    for pos, col in ((0.0, (1, 1, 1, 1)), (1.0, (0, 0, 0, 1))):
+        s = st.gradient_stops.add()
+        s.position, s.color = pos, col
+    img = export_png(tmp_path)
+    center = pixel(img, 0, 0, 1, 100, -50)[0]
+    near = pixel(img, 0, 0, 1, 100 + 49, -50)[0]
+    edge = pixel(img, 0, 0, 1, 100 + 95, -50)[0]
+    assert center > 240 and 70 < near < 200 and edge < 90 and center > near > edge
+
+
 def test_png_text_and_live_outline_drawn_once(seam, tmp_path):
     require(*PNG_KERNELS)
     setup_artboard(400.0, 300.0)
@@ -323,3 +342,47 @@ def test_acceptance_scenario_1(seam, tmp_path, blend_path):
     assert (min(q[0] for q in pts), max(q[0] for q in pts)) == pytest.approx((40.0, 200.0), abs=0.02)
     ab2 = canvas.artboards(bpy.context.scene)[0]
     assert (ab2.seam.artboard.width, ab2.seam.artboard.height) == (400.0, 300.0)
+
+
+# ------------------------------------------------------------------ raster items
+
+def add_raster_plane(scene, x, y, size):
+    from seam_studio.vector import canvas
+    d = scene.seam.rasters.add()
+    d.id = "r1"
+    h = size / 2.0
+    me = bpy.data.meshes.new("RasterPlane")
+    me.from_pydata([(-h, -h, 0), (h, -h, 0), (h, h, 0), (-h, h, 0)], [], [(0, 1, 2, 3)])
+    ob = bpy.data.objects.new("RasterPlane", me)
+    ob.location = (x, y, 0.0)
+    canvas.add_artwork_object(scene, ob, role="RASTER")
+    ob.seam.raster_id = "r1"
+    return ob
+
+
+def test_raster_objects_become_image_items(seam, tmp_path, monkeypatch):
+    require(*PNG_KERNELS)
+    from seam_studio.paint import rasterdoc
+    from seam_studio.seam_core import render2d
+    from seam_studio.vector import export_png
+    ab = setup_artboard(200.0, 100.0)
+    scene = bpy.context.scene
+    add_raster_plane(scene, 100.0, -50.0, 100.0)          # covers x 50..150, y -100..0
+    warnings = []
+    items = export_png.collect_render_items(scene, ab, warnings)
+    assert items == [] and warnings and "Raster" in warnings[0]          # no compositor yet -> skipped with a warning
+    px = np.zeros((2, 2, 4), np.float32)
+    px[0, 0] = (0, 1, 0, 1)
+    px[0, 1] = (1, 0, 0, 1)
+    px[1, 0] = (0, 0, 1, 1)
+    px[1, 1] = (1, 1, 1, 1)
+    monkeypatch.setattr(rasterdoc, "composite_array", lambda doc: px, raising=False)
+    items = export_png.collect_render_items(scene, ab, [])
+    assert len(items) == 1 and isinstance(items[0], render2d.ImageItem)
+    it = items[0]
+    assert (it.x, it.y_top, it.width, it.height) == pytest.approx((50.0, 0.0, 100.0, 100.0))
+    img = export_png.render_artboard(scene, ab, 1.0, True)
+    assert tuple(img[25, 75]) == (0, 255, 0, 255)          # top-left quadrant
+    assert tuple(img[25, 125]) == (255, 0, 0, 255)
+    assert tuple(img[75, 75]) == (0, 0, 255, 255)
+    assert img[50, 20, 3] == 0                              # outside the raster plane

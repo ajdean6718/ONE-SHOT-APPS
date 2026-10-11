@@ -30,6 +30,7 @@ priority 40) derives the visible result instead of modifying the source:
 from __future__ import annotations
 
 import struct
+import warnings
 from typing import List, Optional
 
 import bpy
@@ -264,8 +265,11 @@ def _material(mesh, slot: int, name: str, color, opacity: float):
         else:
             mesh.materials.append(mat)
     mat.diffuse_color = (color[0], color[1], color[2], color[3] * opacity)
-    mat.use_nodes = True
-    bsdf = mat.node_tree.nodes.get("Principled BSDF")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)       # use_nodes is slated for removal in 6.0
+        if not mat.use_nodes:
+            mat.use_nodes = True
+    bsdf = mat.node_tree.nodes.get("Principled BSDF") if mat.node_tree else None
     if bsdf is not None:
         for sock, val in (("Base Color", (color[0], color[1], color[2], 1.0)), ("Alpha", color[3] * opacity)):
             if sock in bsdf.inputs:
@@ -423,12 +427,27 @@ class ClipProducer(Producer):
 
 _producer = ClipProducer()
 
+
+def _orphan_hook(scene, depsgraph):
+    """Scene/collection membership changes (e.g. a mask was deleted): re-check clipped objects whose mask is gone."""
+    for upd in depsgraph.updates:
+        if isinstance(upd.id, (bpy.types.Scene, bpy.types.Collection)):
+            break
+    else:
+        return
+    for ob in scene.objects:
+        if ob.seam.role in VIEWPORT_ROLES and ob.seam.clip_source is None and clip_child(ob) is not None:
+            engine.mark_dirty(clip_key(ob))
+
+
 classes = (SEAM_OT_clip_make, SEAM_OT_clip_release)
 
 
 def register():
     engine.register_producer(_producer)
+    engine.add_update_hook(_orphan_hook)
 
 
 def unregister():
+    engine.remove_update_hook(_orphan_hook)
     engine.unregister_producer(ClipProducer.kind)

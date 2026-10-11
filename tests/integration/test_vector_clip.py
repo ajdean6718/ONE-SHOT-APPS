@@ -195,3 +195,45 @@ def test_clip_export_png_and_svg(clipped, tmp_path):
     bpy.ops.seam.svg_export(filepath=svg_path)
     text = open(svg_path, encoding="utf-8").read()
     assert "clip-path" in text and "<clipPath" in text
+
+
+def test_clip_undo_redo(seam, engine):
+    require("geometry.flatten_path", "boolean2d.boolean", "geometry.triangulate")
+    scene = bpy.context.scene
+    a = add_rect(scene, "Art", 0, 0, 100, 100)
+    mask = add_rect(scene, "Mask", 50, 50, 150, 150)
+    bpy.ops.ed.undo_push(message="shapes")
+    select(a, mask)
+    bpy.ops.seam.clip_make()
+    flush()
+    bpy.ops.ed.undo_push(message="clip")
+    assert clip_child(bpy.data.objects["Art"]) is not None
+    bpy.ops.ed.undo()
+    flush()
+    a = bpy.data.objects["Art"]
+    assert a.seam.clip_source is None and clip_child(a) is None and a.display_type == "TEXTURED"
+    bpy.ops.ed.redo()
+    flush()
+    a = bpy.data.objects["Art"]
+    assert a.seam.clip_source is not None
+    assert mesh_area(clip_child(a)) == pytest.approx(2500.0, rel=1e-4)
+
+
+def test_deleting_the_mask_releases_the_clip(clipped):
+    a, mask = clipped
+    assert clip_child(a) is not None
+    bpy.data.objects.remove(mask, do_unlink=True)             # e.g. the user deletes the mask in the viewport
+    res = flush()
+    assert any(r.key.startswith("clip:") and r.status == "ok" for r in res), res
+    assert clip_child(a) is None and a.display_type == "TEXTURED"
+    assert a.seam.clip_source is None
+
+
+def test_pathfinder_consuming_a_mask_releases_dependants(clipped):
+    a, mask = clipped
+    other = add_rect(bpy.context.scene, "Other", 120, 120, 200, 200)
+    select(mask, other)
+    bpy.ops.seam.pathfinder(op="UNION")
+    assert "Mask" not in bpy.data.objects
+    a = bpy.data.objects["Art"]
+    assert a.seam.clip_source is None and clip_child(a) is None and a.display_type == "TEXTURED"

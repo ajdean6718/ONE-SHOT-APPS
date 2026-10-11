@@ -46,26 +46,34 @@ def selected_shapes(context) -> List[bpy.types.Object]:
 
 def delete_artwork(obj) -> None:
     """Delete an artwork object with its derived children, release dependants and drop orphaned data."""
+    scene = bpy.context.scene
     sid = obj.seam.id
+    doomed = []
+    released = []
     for ob in list(bpy.data.objects):
         if ob is obj:
             continue
         if ob.seam.clip_source is obj:
-            ob.seam.clip_source = None
+            released.append(ob)
         if sid and ob.seam.owner_id == sid:
             if ob.seam.role in ("STROKE", "OUTLINE", "CLIP_RESULT"):
-                _remove_object(ob)
+                doomed.append(ob)
             elif ob.seam.role == "SHAPE":      # live text outline: becomes an ordinary shape
                 ob.seam.owner_id = ""
-    for ch in list(obj.children_recursive):
-        if ch.seam.role in ("STROKE", "OUTLINE", "CLIP_RESULT", "INTERNAL"):
-            _remove_object(ch)
+    if released:
+        from .clip import release_clip      # local import: clip does not depend on this module
+        release_clip(scene, released)
+    for ch in obj.children_recursive:
+        if ch.seam.role in ("STROKE", "OUTLINE", "CLIP_RESULT", "INTERNAL") and ch not in doomed:
+            doomed.append(ch)
+    for ob in doomed:
+        _remove_object(ob)
     _remove_object(obj)
 
 
 def _remove_object(obj) -> None:
-    data = obj.data
     try:
+        data = obj.data
         bpy.data.objects.remove(obj, do_unlink=True)
     except ReferenceError:
         return

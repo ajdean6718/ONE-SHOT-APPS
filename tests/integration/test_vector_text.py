@@ -235,3 +235,23 @@ def test_text_to_outline_errors(seam):
     select(ob)
     with pytest.raises(RuntimeError, match="already has an outline"):
         bpy.ops.seam.text_to_outline()
+
+
+def test_outline_undo_redo_follows_sources(seam, engine):
+    ob = add_text("Undo", size=80.0)
+    bpy.ops.ed.undo_push(message="text added")
+    select(ob)
+    bpy.ops.seam.text_to_outline()
+    flush()
+    bpy.ops.ed.undo_push(message="outline")
+    assert outline_of(bpy.data.objects["Text"]) is not None
+    bpy.ops.ed.undo()
+    flush()
+    text = bpy.data.objects["Text"]
+    assert outline_of(text) is None and text.visible_get()
+    bpy.ops.ed.redo()
+    flush()
+    text = bpy.data.objects["Text"]
+    out = outline_of(text)
+    assert out is not None and not text.visible_get()
+    assert len(out.data.splines) == len(_glyph_paths(text))
