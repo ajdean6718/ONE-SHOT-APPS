@@ -40,7 +40,8 @@ def build_native_scene():
     bev.width = 0.15
     bev.segments = 3
     mat = bpy.data.materials.new("Native Red")
-    mat.use_nodes = True
+    if mat.node_tree is None:                              # 4.x materials start without nodes (5.x: always)
+        mat.use_nodes = True
     mat.diffuse_color = (0.9, 0.05, 0.05, 1.0)           # viewport / Workbench colour
     bsdf = next(n for n in mat.node_tree.nodes if n.type == "BSDF_PRINCIPLED")
     bsdf.inputs["Base Color"].default_value = (0.9, 0.05, 0.05, 1.0)
