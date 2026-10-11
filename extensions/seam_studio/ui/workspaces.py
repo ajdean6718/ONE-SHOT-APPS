@@ -152,34 +152,92 @@ def active_artboard_rect(scene) -> Tuple[float, float, float, float]:
     return (ox + ab.location.x + w * 0.5, oy + ab.location.y - h * 0.5, w, h)
 
 
-def fit_distance(space, region, width: float, height: float, margin: float = 1.15) -> Optional[float]:
-    """Ortho ``view_distance`` that shows ``width`` x ``height`` world units in ``region`` (None: region not laid out)."""
+def usable_rect(area) -> Tuple[float, float, float, float]:
+    """Pixels of a 3D view that artwork can use: ``(width, height, shift_x, shift_y)``.
+
+    With region overlap (the default in 3D views) the toolbar, sidebar and headers float over the window region;
+    the artwork should be centred in what remains. ``shift_*`` is the offset of that rect's centre from the window
+    region's centre in pixels (x right, y up)."""
+    space = area.spaces.active
+    win = window_region(area)
+    if win is None:
+        return (0.0, 0.0, 0.0, 0.0)
+
+    def size(rtype, shown, axis):
+        if not shown:
+            return 0.0
+        r = next((r for r in area.regions if r.type == rtype), None)
+        return float(getattr(r, axis)) if r is not None and r.width > 1 and r.height > 1 else 0.0
+
+    tw = size("TOOLS", space.show_region_toolbar, "width")
+    uw = size("UI", space.show_region_ui, "width")
+    hh = size("HEADER", True, "height") + size("TOOL_HEADER", True, "height")
+    w, h = float(win.width), float(win.height)
+    overlapped_x = w >= area.width - 1
+    overlapped_y = h >= area.height - 1
+    if overlapped_x:
+        sx = (tw - uw) / 2.0
+        w = max(w - tw - uw, 50.0)
+    else:
+        sx = 0.0
+    if overlapped_y:
+        sy = -hh / 2.0
+        h = max(h - hh, 50.0)
+    else:
+        sy = 0.0
+    return (w, h, sx, sy)
+
+
+def _extent_per_px(space, region) -> float:
+    """World units per pixel of an ortho region at the current ``view_distance``."""
+    major = space.region_3d.view_distance * ORTHO_SENSOR / space.lens
+    return major / max(region.width, region.height)
+
+
+def fit_distance(space, region, width: float, height: float, margin: float = 1.15,
+                 usable: Optional[Tuple[float, float]] = None) -> Optional[float]:
+    """Ortho ``view_distance`` that shows ``width`` x ``height`` world units in ``usable`` pixels of ``region``
+    (default: the whole region). None when the region has no size yet."""
     if region is None or region.width < 2 or region.height < 2:
         return None
+    uw, uh = usable if usable is not None else (region.width, region.height)
     major = max(region.width, region.height)
-    # visible extent = dist * ORTHO_SENSOR / lens along the larger side, proportional on the other
-    need_major = max(width * margin * major / region.width, height * margin * major / region.height)
-    return need_major * space.lens / ORTHO_SENSOR
+    # world units per pixel needed so that the artboard (plus margin) fits the usable pixels
+    upp = max(width * margin / uw, height * margin / uh)
+    return upp * major * space.lens / ORTHO_SENSOR
 
 
 def visible_extent(space, region) -> Tuple[float, float]:
     """World-unit width/height currently visible in an ortho ``region`` (analytic, matches ``window_matrix``)."""
-    major = space.region_3d.view_distance * ORTHO_SENSOR / space.lens
-    m = max(region.width, region.height)
-    return (major * region.width / m, major * region.height / m)
+    upp = _extent_per_px(space, region)
+    return (upp * region.width, upp * region.height)
+
+
+def usable_extent(area) -> Tuple[float, float]:
+    """World-unit size of the part of a canvas view not covered by the floating toolbar/sidebar/headers."""
+    space = area.spaces.active
+    region = window_region(area)
+    uw, uh, _sx, _sy = usable_rect(area)
+    upp = _extent_per_px(space, region)
+    return (upp * uw, upp * uh)
 
 
 def frame_artboard(area, scene, margin: float = 1.15) -> bool:
-    """Center a canvas viewport on the active artboard and zoom to fit. False when the region has no size yet."""
+    """Fit the active artboard into the usable part of a canvas viewport and centre it there.
+
+    False when the region has no size yet (not laid out)."""
     space = area.spaces.active
     region = window_region(area)
     r3d = space.region_3d
     cx, cy, w, h = active_artboard_rect(scene)
-    dist = fit_distance(space, region, w, h, margin)
+    uw, uh, sx, sy = usable_rect(area)
+    dist = fit_distance(space, region, w, h, margin, usable=(uw, uh) if uw > 0 else None)
     if r3d is None or dist is None:
         return False
-    r3d.view_location = Vector((cx, cy, 0.0))
     r3d.view_distance = dist
+    upp = _extent_per_px(space, region)
+    # the window-region centre must sit (sx, sy) pixels away from the artboard centre, opposite to the usable shift
+    r3d.view_location = Vector((cx - sx * upp, cy - sy * upp, 0.0))
     return True
 
 
@@ -427,19 +485,38 @@ def run_steps(gen, on_done=None, interval: float = 0.05):
 
 
 def tab_order_steps(window, out: list, start: str = VECTOR):
-    """Generator filling ``out`` with workspace names in tab order beginning at ``start`` (restores the window)."""
+    """Generator filling ``out`` with workspace names in tab order beginning at ``start`` (restores the window).
+
+    ``bpy.data.workspaces`` is alphabetical and ``screen.workspace_cycle`` refuses Python calls, so the order is
+    observed by simulating the default keymap's Ctrl+Page Down ("next workspace"); needs ``--enable-event-simulate``.
+    """
     original = window.workspace
     ws0 = bpy.data.workspaces.get(start) or original
     yield from _switch(window, ws0)
     out.append(ws0.name)
-    for _ in range(len(bpy.data.workspaces) + 1):
-        with _override(window):
-            bpy.ops.screen.workspace_cycle(direction="NEXT")
+    area = next(a for a in window.screen.areas if a.type == "VIEW_3D")
+    region = window_region(area)
+    x, y = region.x + region.width // 2, region.y + region.height // 2
+    for _ in range(len(bpy.data.workspaces)):
+        current = window.workspace.name
+        window.event_simulate(type="MOUSEMOVE", value="NOTHING", x=x, y=y)
+        yield 2
+        window.event_simulate(type="PAGE_DOWN", value="PRESS", ctrl=True, x=x, y=y)
+        window.event_simulate(type="PAGE_DOWN", value="RELEASE", ctrl=True, x=x, y=y)
+        for _tick in range(60):
+            yield 1
+            if window.workspace.name != current:
+                break
+        else:
+            raise WorkspaceError("Ctrl+Page Down did not switch workspace (is --enable-event-simulate set?)")
         yield 2
         name = window.workspace.name
         if name == out[0]:
             break
         out.append(name)
+        area = next((a for a in window.screen.areas if a.type != "EMPTY"), area)
+        region = area.regions[-1] if area.regions else region
+        x, y = region.x + max(region.width, 2) // 2, region.y + max(region.height, 2) // 2
     yield from _switch(window, original)
 
 

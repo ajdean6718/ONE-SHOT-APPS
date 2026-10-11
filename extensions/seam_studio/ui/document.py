@@ -77,6 +77,16 @@ def apply_new_document_defaults(scene, context=None) -> bool:
     return changed
 
 
+def set_standard_view_transform(scene) -> None:
+    """Colour management ``Standard`` (what you paint/draw is what you get; Filmic/AgX would shift flat colours)."""
+    vs = scene.view_settings
+    try:
+        vs.view_transform = "Standard"
+        vs.look = "None"
+    except TypeError:  # an unknown enum value on an exotic OCIO config: leave the user's setting alone
+        pass
+
+
 def ensure_document(scene=None, context=None) -> Tuple[object, bool]:
     """Make sure the scene has the SEAM canvas. Returns ``(canvas_root, created)``; new canvases follow preferences."""
     from ..vector import canvas
@@ -84,5 +94,6 @@ def ensure_document(scene=None, context=None) -> Tuple[object, bool]:
     existed = has_canvas(scene)
     root = canvas.ensure_canvas(scene)
     if not existed:
+        set_standard_view_transform(scene)
         apply_new_document_defaults(scene, context)
     return root, not existed

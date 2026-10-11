@@ -66,16 +66,34 @@ def test_frame_artboard_fits_and_centres(seam, win):
     region = W.window_region(area)
     cx, cy, w, h = W.active_artboard_rect(scene)
     assert (cx, cy, w, h) == (960.0, -20540.0, 1920.0, 1080.0)
-    assert tuple(space.region_3d.view_location)[:2] == pytest.approx((cx, cy))
-    vw, vh = W.visible_extent(space, region)
-    # with margin 1.0 the artboard touches the limiting dimension and fits in the other
-    assert vw >= w - 1e-3 and vh >= h - 1e-3
-    assert math.isclose(vw, w, rel_tol=1e-6) or math.isclose(vh, h, rel_tol=1e-6)
+    uw, uh = W.usable_extent(area)
+    # the usable part (not covered by floating toolbar / sidebar / header) shows the artboard, tight in one dimension
+    assert uw >= w - 1e-3 and uh >= h - 1e-3
+    assert math.isclose(uw, w, rel_tol=1e-6) or math.isclose(uh, h, rel_tol=1e-6)
+    # ... and its centre is the artboard centre
+    pw, ph, sx, sy = W.usable_rect(area)
+    upp = W._extent_per_px(space, region)
+    loc = space.region_3d.view_location
+    assert (loc.x + sx * upp, loc.y + sy * upp) == pytest.approx((cx, cy), abs=1e-3)
     # larger artboard -> zoomed out proportionally
     dist1 = space.region_3d.view_distance
     canvas.active_artboard(scene).seam.artboard.width = 3840
     W.frame_artboard(area, scene, margin=1.0)
     assert space.region_3d.view_distance > dist1
+
+
+def test_usable_rect_accounts_for_floating_regions(seam, win):
+    _screen, area = _layout_area(win)
+    space = area.spaces.active
+    space.show_region_ui = False
+    space.show_region_toolbar = False
+    w0, h0, sx0, sy0 = W.usable_rect(area)
+    space.show_region_ui = True
+    space.show_region_toolbar = True
+    w1, h1, sx1, sy1 = W.usable_rect(area)
+    region = W.window_region(area)
+    assert w0 <= region.width and h0 <= region.height
+    assert w1 <= w0 and h1 <= h0          # showing the sidebar and toolbar can only shrink the usable rect
 
 
 def test_fit_distance_needs_a_laid_out_region(seam):

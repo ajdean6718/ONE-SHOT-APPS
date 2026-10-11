@@ -31,7 +31,7 @@ def quickstart_status(kind: str, scene=None):
         ok, why = util.op_available(idname, props)
         if not ok:
             feature = "Paint" if kind == "PAINT" else "Vector or 3D link"
-            return False, f"{feature} tools are not installed in this build ({why})."
+            return False, f"{feature} tools are not installed in this build: {why}."
     return True, ""
 
 

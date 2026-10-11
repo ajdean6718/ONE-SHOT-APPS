@@ -1,11 +1,23 @@
 """Welcome/empty states, document panel, header status, shortcuts help (owner: shell)."""
 
+import time
+
 import bpy
 
 from ..seam_core.units import px_to_unit
 from . import document, health, keymaps, ops, prefs as prefs_mod
 
 CATEGORY = "SEAM"
+
+#: region pointer -> time.monotonic() of the last Document-panel draw there. Panels of an inactive sidebar tab are
+#: not drawn, so this tells scripts (``scripts/build_template.py``, GUI tests) which 3D views show the SEAM tab:
+#: Blender 4.0 offers no API to read or set the active sidebar category.
+drawn_regions = {}
+
+
+def seam_tab_shown(region, since: float) -> bool:
+    """True if the SEAM sidebar tab was drawn in ``region`` at or after ``since`` (``time.monotonic()``)."""
+    return drawn_regions.get(region.as_pointer(), 0.0) >= since
 
 
 class _SeamPanel:
@@ -28,8 +40,8 @@ class SEAM_PT_start(_SeamPanel, bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         col = layout.column(align=True)
-        col.label(text="Draw, paint, or make 3D from a drawing.")
-        col.label(text="Pick a starting point:")
+        col.label(text="Draw, paint, or turn a")
+        col.label(text="drawing into live 3D.")
         layout.separator(factor=0.5)
         icons = {"VECTOR": "OUTLINER_OB_CURVE", "PAINT": "BRUSH_DATA", "DRAW3D": "MESH_CUBE"}
         idnames = {"VECTOR": "seam.new_vector_document", "PAINT": "seam.new_paint_canvas", "DRAW3D": "seam.draw_to_3d"}
@@ -41,7 +53,7 @@ class SEAM_PT_start(_SeamPanel, bpy.types.Panel):
             if not ok:
                 sub = layout.column(align=True)
                 sub.scale_y = 0.8
-                for line in _wrap(why, 38):
+                for line in _wrap(why, 27):
                     sub.label(text=line)
         layout.separator(factor=0.5)
         row = layout.row()
@@ -78,6 +90,8 @@ class SEAM_PT_document(_SeamPanel, bpy.types.Panel):
         scene = context.scene
         doc = scene.seam.doc
         eng = scene.seam.engine
+        if context.region is not None:
+            drawn_regions[context.region.as_pointer()] = time.monotonic()
 
         col = layout.column(align=True)
         col.prop(doc, "units")

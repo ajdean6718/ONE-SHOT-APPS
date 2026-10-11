@@ -38,7 +38,7 @@ def op_property_names(idname: str):
 def op_available(idname: str, props=()):
     """``(ok, reason)``: operator registered and accepting every name in ``props``."""
     if op_callable(idname) is None:
-        return False, f"operator {idname} is not installed in this build"
+        return False, f"operator {idname} is not registered"
     have = set(op_property_names(idname))
     missing = [p for p in props if p not in have]
     if missing:

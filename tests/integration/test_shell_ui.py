@@ -85,8 +85,11 @@ def test_new_document_follows_preferences(prefs_reset):
     ys = sorted({round(v.co.y) for v in ab.data.vertices})
     assert xs == [0, 800] and ys == [-600, 0]
     assert scene.seam.doc.units == "MM" and scene.seam.doc.dpi == 300.0
+    assert scene.view_settings.view_transform == "Standard"
     # a second call finds the canvas and changes nothing
+    scene.view_settings.view_transform = "Raw"
     assert document.ensure_document(scene)[1] is False
+    assert scene.view_settings.view_transform == "Raw"
 
 
 def test_defaults_never_touch_a_document_with_artwork(prefs_reset):
