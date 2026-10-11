@@ -11,6 +11,9 @@ from helpers import save_and_reload
 from test_paint_support import flush, kernel, new_doc, noise, paint_pixels, pixels, rd, solid  # noqa: F401
 
 
+F32 = lambda v: float(np.float32(v))  # property values are stored as float32
+
+
 def lin(c8):
     from seam_studio.seam_core import raster as R
     return R.srgb_to_linear(np.asarray(c8, np.float32) / 255.0)
@@ -76,22 +79,22 @@ def test_property_changes_change_composite_exactly_as_kernel_predicts(seam, kern
     doc.layers[1].opacity = 0.4
     c1 = r.composite_array(doc)
     assert not np.array_equal(c1, base)
-    assert np.array_equal(c1, predict([1, 0.4, 1], ["NORMAL"] * 3, [True] * 3, True, None))
+    assert np.array_equal(c1, predict([1, F32(0.4), 1], ["NORMAL"] * 3, [True] * 3, True, None))
     doc.layers[1].blend_mode = "MULTIPLY"
     doc.layers[2].blend_mode = "SCREEN"
     c2 = r.composite_array(doc)
-    assert np.array_equal(c2, predict([1, 0.4, 1], ["NORMAL", "MULTIPLY", "SCREEN"], [True] * 3, True, None))
+    assert np.array_equal(c2, predict([1, F32(0.4), 1], ["NORMAL", "MULTIPLY", "SCREEN"], [True] * 3, True, None))
     assert not np.array_equal(c2, c1)
     doc.layers[2].mask_enabled = False
     c3 = r.composite_array(doc)
-    assert np.array_equal(c3, predict([1, 0.4, 1], ["NORMAL", "MULTIPLY", "SCREEN"], [True] * 3, False, None))
+    assert np.array_equal(c3, predict([1, F32(0.4), 1], ["NORMAL", "MULTIPLY", "SCREEN"], [True] * 3, False, None))
     assert not np.array_equal(c3, c2)
     doc.layers[0].visible = False
     c4 = r.composite_array(doc)
-    assert np.array_equal(c4, predict([1, 0.4, 1], ["NORMAL", "MULTIPLY", "SCREEN"], [False, True, True], False, None))
+    assert np.array_equal(c4, predict([1, F32(0.4), 1], ["NORMAL", "MULTIPLY", "SCREEN"], [False, True, True], False, None))
     doc.background = "WHITE"
     c5 = r.composite_array(doc)
-    assert np.array_equal(c5, predict([1, 0.4, 1], ["NORMAL", "MULTIPLY", "SCREEN"], [False, True, True], False,
+    assert np.array_equal(c5, predict([1, F32(0.4), 1], ["NORMAL", "MULTIPLY", "SCREEN"], [False, True, True], False,
                                       (1, 1, 1, 1)))
     assert np.allclose(c5[..., 3], 1.0)
 
@@ -475,3 +478,79 @@ def test_async_composite_path(seam, engine, kernel, monkeypatch):
     doc = bpy.context.scene.seam.rasters[0]
     assert tuple(pixels(doc.composite)[0, 0]) == (0, 255, 0, 255)
     assert np.array_equal(pixels(doc.composite), R.to_uint8_srgb(r.composite_array(doc)))
+
+
+def test_acceptance_scenario_2_raster_document(seam, kernel, blend_path, tmp_path):
+    """Create a document, two layers, pixel writes, erase in a selection, composite properties, undo, save, export."""
+    from seam_studio.seam_core import png
+    from seam_studio.seam_core import raster as R
+    r = rd()
+    scene = bpy.context.scene
+    doc = r.new_raster_doc(scene, "Scenario", 16, 12, "TRANSPARENT")
+    r.add_layer(doc, "Blue")
+    doc = scene.seam.rasters[0]
+    assert len(doc.layers) == 2
+    red = np.zeros((12, 16, 4), np.float32)
+    red[..., 0] = 1.0
+    red[..., 3] = 1.0  # opaque linear red
+    blue = np.zeros((12, 16, 4), np.float32)
+    blue[..., 2] = 1.0
+    blue[..., 3] = 1.0
+    r.write_layer_array(doc.layers[0], red)
+    r.write_layer_array(doc.layers[1], blue)
+    # erase inside a selection on the top layer
+    bpy.ops.seam.raster_select_rect(x0=4, y0=3, x1=12, y1=9)
+    assert bpy.ops.seam.raster_clear() == {"FINISHED"}
+    doc = scene.seam.rasters[0]
+    top = pixels(doc.layers[1].image)
+    assert (top[3:9, 4:12, 3] == 0).all() and top[..., 3].sum() == 255 * (16 * 12 - 8 * 6)
+    comp = r.composite_array(doc)
+    assert np.allclose(comp[5, 6], (1, 0, 0, 1)) and np.allclose(comp[0, 0], (0, 0, 1, 1))  # red shows through the hole
+    # opacity / blend / mask against the kernel
+    doc.layers[1].opacity = 0.5
+    c = r.composite_array(doc)
+    assert np.allclose(c[0, 0], (0.5, 0, 0.5, 1), atol=1e-6) and np.allclose(c[5, 6], (1, 0, 0, 1))
+    doc.layers[1].blend_mode = "MULTIPLY"
+    c = r.composite_array(doc)
+    expect = R.composite([R.LayerSpec(r.layer_array(doc.layers[0])),
+                          R.LayerSpec(r.layer_array(doc.layers[1]), 0.5, "MULTIPLY")], 12, 16, None)
+    assert np.array_equal(c, expect)
+    r.add_mask(doc, 1, "WHITE")
+    m = np.ones((12, 16), np.float32)
+    m[:, :8] = 0.0
+    r.write_mask_array(doc.layers[1], m)
+    c2 = r.composite_array(doc)
+    assert np.allclose(c2[0, :8], c[0, :8] * 0 + (1, 0, 0, 1), atol=1e-6) and np.array_equal(c2[0, 8:], c[0, 8:])
+    nodes = [n for n in doc.material.node_tree.nodes if n.bl_idname == "ShaderNodeTexImage"]
+    assert [n.image for n in nodes].count(doc.layers[1].mask) == 1
+    assert all([n.image for n in nodes].count(l.image) == 1 for l in doc.layers)
+    # undo / redo of a layer property change
+    bpy.ops.ed.undo_push(message="a")
+    bpy.ops.ed.undo_push(message="b")
+    doc.layers[1].opacity = 0.25
+    flush()
+    bpy.ops.ed.undo_push(message="opacity")
+    bpy.ops.ed.undo()
+    flush()
+    doc = bpy.context.scene.seam.rasters[0]
+    assert doc.layers[1].opacity == 0.5
+    assert np.array_equal(r.composite_array(doc), c2)
+    bpy.ops.ed.redo()
+    flush()
+    doc = bpy.context.scene.seam.rasters[0]
+    assert doc.layers[1].opacity == 0.25
+    # save / reopen: exact pixels and layer props
+    before = [pixels(l.image).copy() for l in doc.layers]
+    mask_before = pixels(doc.layers[1].mask).copy()
+    scene = save_and_reload(blend_path)
+    doc = scene.seam.rasters[0]
+    assert [l.name for l in doc.layers] == ["Layer 1", "Blue"]
+    assert doc.layers[1].blend_mode == "MULTIPLY" and abs(doc.layers[1].opacity - 0.25) < 1e-6
+    for l, b in zip(doc.layers, before):
+        assert np.array_equal(pixels(l.image), b)
+    assert np.array_equal(pixels(doc.layers[1].mask), mask_before)
+    # PNG export decodes to the expected composite
+    out = str(tmp_path / "scenario.png")
+    assert bpy.ops.seam.raster_export_png(filepath=out) == {"FINISHED"}
+    got = png.read_png(out)
+    assert np.array_equal(got, R.to_uint8_srgb(r.composite_array(doc)))

@@ -39,8 +39,11 @@ class SEAM_PT_paint_document(bpy.types.Panel):
         scene = context.scene
         doc = _doc(context)
         if len(scene.seam.rasters) > 1:
-            layout.prop(scene.seam, "active_raster_index", text="Document")
-            doc = _doc(context)
+            col = layout.column(align=True)
+            for i, d in enumerate(scene.seam.rasters):
+                op = col.operator("seam.raster_activate", text=d.name, icon="IMAGE_DATA",
+                                  depress=(doc is not None and d.id == doc.id))
+                op.index = i
         if doc is None:
             layout.operator("seam.raster_new", icon="FILE_NEW")
             layout.label(text="Create a canvas to paint on layers", icon="INFO")

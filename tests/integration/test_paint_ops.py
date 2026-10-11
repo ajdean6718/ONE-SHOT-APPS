@@ -7,7 +7,7 @@ import bpy
 
 from test_paint_support import flush, kernel, new_doc, noise, paint_pixels, pixels, rd, solid  # noqa: F401
 
-ALL_OPS = ["raster_remove", "raster_layer_add", "raster_layer_remove", "raster_layer_duplicate", "raster_layer_move",
+ALL_OPS = ["raster_activate", "raster_remove", "raster_layer_add", "raster_layer_remove", "raster_layer_duplicate", "raster_layer_move",
            "raster_layer_merge_down", "raster_mask_add", "raster_mask_apply", "raster_mask_remove",
            "raster_set_paint_target", "raster_paint_mode", "raster_fill", "raster_clear", "raster_resize_canvas",
            "raster_select_rect", "raster_select_ellipse", "raster_select_lasso", "raster_select_all",
@@ -234,3 +234,21 @@ def test_draw_functions_run_with_a_recording_layout(seam):
     row = Rec()
     ui.SEAM_UL_raster_layers.draw_item(lst, None, row, doc, doc.layers[1], 0, doc, "active_layer_index", 1)
     assert [c[0] for c in row.all_calls()].count("prop") >= 3
+
+
+def test_activate_switches_documents_and_canvas(seam):
+    a = new_doc(4, 4, "A")
+    b = new_doc(4, 4, "B")
+    scene = bpy.context.scene
+    assert rd().active_doc(scene).name == "B"
+    assert bpy.ops.seam.raster_activate(index=0) == {"FINISHED"}
+    d = rd().active_doc(scene)
+    assert d.name == "A" and scene.seam.active_raster_index == 0
+    assert bpy.context.view_layer.objects.active == d.canvas
+    assert bpy.ops.seam.raster_activate(index=5) == {"CANCELLED"}
+    # a non-canvas active object leaves the index in charge
+    sq = bpy.data.objects.new("plain", None)
+    scene.collection.objects.link(sq)
+    bpy.context.view_layer.objects.active = sq
+    scene.seam.active_raster_index = 1
+    assert rd().active_doc(scene).name == "B"

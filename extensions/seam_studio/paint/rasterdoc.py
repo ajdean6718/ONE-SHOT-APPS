@@ -9,8 +9,8 @@ Data model (see docs/architecture.md D4)
   document's top-left corner, role ``RASTER``, parented to the canvas root through ``canvas.add_artwork_object``.
   Its mesh has two identical UV maps (``UVMap`` and ``SEAM Stencil``); the second one drives the native stencil mask.
 * The canvas material composites the visible layers bottom->top with Mix nodes (``compat.new_mix_rgb_node``,
-  blend types from ``raster.BLENDER_MIX_TYPE``).  Factor = layer alpha x opacity x mask, alpha accumulates with
-  Math nodes, output = Emission mixed with Transparent (alpha blend).  The formulas are those of
+  blend types from ``raster.BLENDER_MIX_TYPE``; non-normal modes blend at full factor and then mix by
+  layer alpha x opacity x mask, exactly like the kernel).  Alpha accumulates with Math nodes, output = Emission mixed with Transparent (alpha blend).  The formulas are those of
   ``seam_core.raster.composite`` which is used for export.
 * Extra nodes: ``SEAM Composite`` (the cached composite image, the active node while NOT painting so that
   Solid/TEXTURE shows the whole picture) and ``SEAM Sink`` (a 1x1 image that is the paint target while the
@@ -1070,15 +1070,31 @@ def build_material(doc) -> None:
         if cur_rgb is None:  # nothing underneath: rgb = layer rgb, alpha = f
             cur_rgb, cur_a = layer_rgb, f_src
             continue
+        # kernel formula: rgb = mix(prev, blend(mode, prev, layer) at full factor, f).  The Mix node applies its factor
+        # *inside* the blend formula (not equivalent for dodge/burn), so non-normal modes use two Mix nodes:
+        # blend at factor 1, then a plain mix by f.
         mix, fac, a_in, b_in, blended = compat.new_mix_rgb_node(nodes, R.BLENDER_MIX_TYPE[ly.blend_mode])
         mix.label = ly.blend_mode.replace("_", " ").title()
         mix.location = (x + 320.0, y)
-        links.new(f_src, fac)
         if isinstance(cur_rgb, tuple):
             a_in.default_value = cur_rgb
         else:
             links.new(cur_rgb, a_in)
         links.new(layer_rgb, b_in)
+        if ly.blend_mode == "NORMAL":
+            links.new(f_src, fac)
+        else:
+            fac.default_value = 1.0
+            fmix, ffac, fa, fb, fres = compat.new_mix_rgb_node(nodes, "MIX")
+            fmix.label = "By alpha x opacity x mask"
+            fmix.location = (x + 480.0, y + 120.0)
+            links.new(f_src, ffac)
+            if isinstance(cur_rgb, tuple):
+                fa.default_value = cur_rgb
+            else:
+                links.new(cur_rgb, fa)
+            links.new(blended, fb)
+            blended = fres
         if isinstance(cur_a, float) and cur_a >= 1.0:
             cur_rgb, cur_a = blended, 1.0
         elif isinstance(cur_a, float):  # constant partial background alpha > 0

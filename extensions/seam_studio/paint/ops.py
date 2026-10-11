@@ -131,6 +131,30 @@ class SEAM_OT_raster_new(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class SEAM_OT_raster_activate(bpy.types.Operator):
+    bl_idname = "seam.raster_activate"
+    bl_label = "Activate Raster Document"
+    bl_description = "Make this raster document the active one and select its canvas"
+    bl_options = {"REGISTER", "UNDO"}
+
+    index: IntProperty(name="Document", min=0, default=0)
+
+    @classmethod
+    def poll(cls, context):
+        return _need_doc(cls, context)
+
+    def execute(self, context):
+        rs = context.scene.seam.rasters
+        if not 0 <= self.index < len(rs):
+            return {"CANCELLED"}
+        context.scene.seam.active_raster_index = self.index
+        if context.object is not None and context.object.mode != "OBJECT":
+            self.report({"INFO"}, "Leave the current mode to switch canvases")
+            return {"FINISHED"}
+        _focus_canvas(context, rs[self.index])
+        return {"FINISHED"}
+
+
 class SEAM_OT_raster_remove(bpy.types.Operator):
     bl_idname = "seam.raster_remove"
     bl_label = "Delete Raster Document"
@@ -508,7 +532,7 @@ class SEAM_OT_raster_resize_canvas(bpy.types.Operator):
         return {"FINISHED"}
 
 
-classes = (SEAM_OT_raster_new, SEAM_OT_raster_remove, SEAM_OT_raster_layer_add, SEAM_OT_raster_layer_remove,
+classes = (SEAM_OT_raster_new, SEAM_OT_raster_activate, SEAM_OT_raster_remove, SEAM_OT_raster_layer_add, SEAM_OT_raster_layer_remove,
            SEAM_OT_raster_layer_duplicate, SEAM_OT_raster_layer_move, SEAM_OT_raster_layer_merge_down,
            SEAM_OT_raster_mask_add, SEAM_OT_raster_mask_apply, SEAM_OT_raster_mask_remove,
            SEAM_OT_raster_set_paint_target, SEAM_OT_raster_paint_mode, SEAM_OT_raster_fill, SEAM_OT_raster_clear,
