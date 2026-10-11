@@ -45,9 +45,11 @@ def flush():
 
 def paint_pixels(layer, rgba8, mask=False):
     """Write uint8 pixels (H x W x 4, top row first) without any kernel function."""
-    img = layer.mask if mask else layer.image
-    rd().write_image_srgb8(img, np.asarray(rgba8, np.uint8))
-    rd().touch_layer(layer, mask=mask)
+    a8 = np.asarray(rgba8, np.uint8)
+    if mask:
+        rd().write_mask_array(layer, a8[..., 0].astype(np.float32) / 255.0)
+    else:
+        rd().write_layer_array_srgb8(layer, a8)
 
 
 def pixels(image):

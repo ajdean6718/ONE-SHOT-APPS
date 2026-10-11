@@ -48,6 +48,7 @@ from __future__ import annotations
 import hashlib
 import traceback
 import zlib
+from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
 import bpy
@@ -203,6 +204,7 @@ def _new_image(name: str, w: int, h: int, colorspace: str, fill=(0, 0, 0, 0)):
     img.alpha_mode = "STRAIGHT"
     img.colorspace_settings.name = colorspace
     img.use_fake_user = True
+    img["seam_raster"] = 1  # marker: images owned by the paint module (orphans are purged on save)
     buf = np.empty(int(w) * int(h) * 4, np.float32)
     buf.reshape(-1, 4)[:] = np.asarray(fill, np.float32)
     img.pixels.foreach_set(buf)
@@ -232,7 +234,9 @@ def layer_array(layer) -> np.ndarray:
 
 
 def write_layer_array_srgb8(layer, rgba8: np.ndarray, touch: bool = True) -> None:
-    write_image_srgb8(layer.image, rgba8)
+    a8 = np.asarray(rgba8, np.uint8)
+    write_image_srgb8(layer.image, a8)
+    commit_pixels(layer, "img", a8)
     if touch:
         touch_layer(layer)
 
@@ -258,8 +262,152 @@ def write_mask_array(layer, mask: np.ndarray, touch: bool = True) -> None:
     a8[..., 0] = a8[..., 1] = a8[..., 2] = v
     a8[..., 3] = 255
     write_image_srgb8(layer.mask, a8)
+    commit_pixels(layer, "mask", a8)
     if touch:
         touch_layer(layer, mask=True)
+
+
+# --------------------------------------------------------------------------- pixel journal (undo of pixel edits)
+#
+# Blender's memfile undo restores properties but NOT the pixels of images edited from Python (measured on 4.0.2 and
+# 5.2.2, even after re-packing).  Every SEAM write path therefore bumps a revision counter stored in the data
+# (``layer.rev`` / ``layer.mask_rev`` / ``doc.sel_rev``, restored by undo with everything else) and stores the new
+# pixels (zlib level 1) in a bounded in-memory journal.  After undo/redo the handler compares the restored
+# revision with the revision of the pixels currently in the image and swaps in the journal snapshot when they
+# differ.  Native brush strokes are undone by Blender's own image undo and are not touched.  Revision 0 means
+# "initial content": transparent layer, white mask, empty selection.
+
+JOURNAL_LIMIT_BYTES = 384 * 1024 * 1024
+_journal: "OrderedDict[Tuple[str, str, int], Tuple[int, int, bytes]]" = OrderedDict()
+_journal_bytes = 0
+_applied: Dict[Tuple[str, str], int] = {}   # (owner id, kind) -> revision of the pixels held by the image
+_REV_ATTR = {"img": "rev", "mask": "mask_rev", "sel": "sel_rev"}
+
+
+def _holder_image(holder, kind):
+    return {"img": lambda: holder.image, "mask": lambda: holder.mask, "sel": lambda: holder.selection}[kind]()
+
+
+def _journal_put(key, a8: np.ndarray) -> None:
+    global _journal_bytes
+    a8 = np.ascontiguousarray(a8, np.uint8)
+    blob = zlib.compress(a8.tobytes(), 1)
+    old = _journal.pop(key, None)
+    if old is not None:
+        _journal_bytes -= len(old[2])
+    _journal[key] = (a8.shape[1], a8.shape[0], blob)
+    _journal_bytes += len(blob)
+    while _journal_bytes > JOURNAL_LIMIT_BYTES and len(_journal) > 1:
+        _k, v = _journal.popitem(last=False)
+        _journal_bytes -= len(v[2])
+
+
+def _journal_get(key) -> Optional[np.ndarray]:
+    ent = _journal.get(key)
+    if ent is None:
+        return None
+    w, h, blob = ent
+    return np.frombuffer(zlib.decompress(blob), np.uint8).reshape(h, w, 4).copy()
+
+
+def journal_clear() -> None:
+    global _journal_bytes
+    _journal.clear()
+    _journal_bytes = 0
+
+
+def commit_pixels(holder, kind: str, a8: np.ndarray) -> int:
+    """Record that the image of ``holder`` (layer or document) now holds ``a8``: new revision + journal entry."""
+    attr = _REV_ATTR[kind]
+    rev = int(getattr(holder, attr)) + 1
+    setattr(holder, attr, rev)
+    _journal_put((holder.id, kind, rev), a8)
+    _applied[(holder.id, kind)] = rev
+    return rev
+
+
+def snapshot_current(holder, kind: str) -> None:
+    """Store the pixels currently in the image under the current revision (call before deleting an image)."""
+    img = _holder_image(holder, kind)
+    if img is not None:
+        _journal_put((holder.id, kind, int(getattr(holder, _REV_ATTR[kind]))), read_image_srgb8(img))
+
+
+def _forget_applied(owner_id: str) -> None:
+    for kind in _REV_ATTR:
+        _applied.pop((owner_id, kind), None)
+
+
+def _default_pixels(kind: str, w: int, h: int) -> np.ndarray:
+    a = np.zeros((h, w, 4), np.uint8)
+    if kind == "mask":
+        a[:] = 255
+    elif kind == "sel":
+        a[..., 3] = 255
+    return a
+
+
+def _pixel_holders():
+    for sc in bpy.data.scenes:
+        for doc in sc.seam.rasters:
+            if doc.selection is not None:
+                yield doc, doc, "sel"
+            for ly in doc.layers:
+                if ly.image is not None:
+                    yield doc, ly, "img"
+                if ly.mask is not None:
+                    yield doc, ly, "mask"
+
+
+def _content_rev(img, key) -> Optional[int]:
+    """Revision of the pixels an image holds right now, or None when it holds nothing meaningful.
+
+    Live (dirty) buffers are SEAM's own writes (``_applied``); a clean packed image holds what was packed
+    (recorded in ``seam_packed_rev``, which undo restores together with the packed data); a clean unpacked image is
+    a freshly re-created, blank datablock (memfile undo re-reads images whose datablock differs between steps)."""
+    if img.is_dirty:
+        return _applied.get(key)
+    if img.packed_file is not None:
+        v = img.get("seam_packed_rev")
+        return None if v is None else int(v)
+    return None
+
+
+def restore_pixels_after_undo() -> int:
+    """Make every SEAM image hold the pixels of the revision that undo/redo restored. Returns images restored."""
+    n = 0
+    holders = list(_pixel_holders())
+    present = {(h.id, k) for _d, h, k in holders}
+    for k in [k for k in _applied if k not in present]:
+        del _applied[k]  # holder vanished (undo of its creation): redo recreates a blank image that must be refilled
+    for doc, holder, kind in holders:
+        rev = int(getattr(holder, _REV_ATTR[kind]))
+        key = (holder.id, kind)
+        img = _holder_image(holder, kind)
+        if _content_rev(img, key) == rev:
+            _applied[key] = rev
+            continue
+        w, h = doc_size(doc)
+        a8 = _journal_get((holder.id, kind, rev))
+        if a8 is None:
+            if rev != 0:
+                print(f"SEAM: no journal entry for {kind} revision {rev} of {holder.id}; pixels left as they are")
+                _applied[key] = rev
+                continue
+            a8 = _default_pixels(kind, w, h)
+        if (int(img.size[0]), int(img.size[1])) != (a8.shape[1], a8.shape[0]):
+            img.scale(int(a8.shape[1]), int(a8.shape[0]))
+        write_image_srgb8(img, a8)
+        _applied[key] = rev
+        n += 1
+    return n
+
+
+def mark_pixels_applied() -> None:
+    """After a file load the images hold the saved pixels of the saved revisions."""
+    _applied.clear()
+    for _doc, holder, kind in _pixel_holders():
+        _applied[(holder.id, kind)] = int(getattr(holder, _REV_ATTR[kind]))
 
 
 # --------------------------------------------------------------------------- revisions (stroke detection)
@@ -278,6 +426,7 @@ def _forget_layer(layer_id: str) -> None:
     for kind in ("img", "mask"):
         _revs.pop((layer_id, kind), None)
         _fingerprints.pop((layer_id, kind), None)
+    _forget_applied(layer_id)
 
 
 def touch_layer(layer, mask: bool = False) -> None:
@@ -400,6 +549,9 @@ def remove_layer(doc, index: int) -> None:
     _check_index(doc, index)
     layer = doc.layers[index]
     lid = layer.id
+    snapshot_current(layer, "img")  # undo restores the (blank) image datablock; the journal refills it
+    if layer.mask is not None:
+        snapshot_current(layer, "mask")
     for img in (layer.image, layer.mask):
         _remove_image(img)
     doc.layers.remove(index)
@@ -446,6 +598,9 @@ def duplicate_layer(doc, index: int):
     new = doc.layers[n]
     new.opacity, new.blend_mode, new.visible, new.locked, new.mask_enabled = props
     new.mask = mask_img
+    commit_pixels(new, "img", read_image_srgb8(img))
+    if mask_img is not None:
+        commit_pixels(new, "mask", read_image_srgb8(mask_img))
     doc.layers.move(n, index + 1)
     doc.active_layer_index = index + 1
     refresh(doc)
@@ -476,9 +631,14 @@ def merge_down(doc, index: int):
     merged = R.composite(specs, h, w, None)
     write_layer_array(lower, merged)
     if lower.mask is not None:
+        snapshot_current(lower, "mask")
         _remove_image(lower.mask)
         lower.mask = None
+        _applied.pop((lower.id, "mask"), None)
     lid = upper.id
+    snapshot_current(upper, "img")
+    if upper.mask is not None:
+        snapshot_current(upper, "mask")
     for img in (upper.image, upper.mask):
         _remove_image(img)
     doc.layers.remove(index)
@@ -509,6 +669,8 @@ def add_mask(doc, index: int, fill: str = "WHITE"):
     img = _new_image(_layer_image_name(doc, layer.name, "mask"), w, h, "Non-Color", (value, value, value, 1.0))
     layer.mask = img
     layer.mask_enabled = True
+    if fill == "BLACK":
+        commit_pixels(layer, "mask", read_image_srgb8(img))
     if fill == "SELECTION":
         from . import selection
         sel = selection.selection_array(doc)
@@ -536,8 +698,10 @@ def remove_mask(doc, index: int) -> None:
     layer = doc.layers[index]
     if layer.mask is None:
         return
+    snapshot_current(layer, "mask")
     _remove_image(layer.mask)
     layer.mask = None
+    _applied.pop((layer.id, "mask"), None)
     _revs.pop((layer.id, "mask"), None)
     _fingerprints.pop((layer.id, "mask"), None)
     if doc.edit_target == "MASK" and index == doc.active_layer_index:
@@ -638,9 +802,15 @@ def remove_doc(scene, doc) -> None:
     scene = scene or doc_scene(doc)
     obj, ma = doc.canvas, doc.material
     imgs = [doc.composite, doc.selection, doc.sink]
+    if doc.selection is not None:
+        snapshot_current(doc, "sel")
     for ly in doc.layers:
         imgs += [ly.image, ly.mask]
+        snapshot_current(ly, "img")
+        if ly.mask is not None:
+            snapshot_current(ly, "mask")
         _forget_layer(ly.id)
+    _forget_applied(doc.id)
     rid = doc.id
     ip = scene.tool_settings.image_paint
     if ip.stencil_image is not None and ip.stencil_image in imgs:
@@ -1150,49 +1320,89 @@ class RasterCacheProducer(engine.Producer):
 # --------------------------------------------------------------------------- handlers
 
 def pack_images(scene) -> int:
-    """Pack every dirty/unpacked SEAM raster image (layers, masks, selection, composite). Returns the count."""
+    """Pack every dirty/unpacked SEAM raster image (layers, masks, selection, composite). Returns the count.
+
+    Packed layer/mask/selection images record the revision they hold in ``seam_packed_rev``."""
     n = 0
     for doc in scene.seam.rasters:
-        imgs = [doc.composite, doc.selection]
+        items = [(doc.composite, None, None)]
+        if doc.selection is not None:
+            items.append((doc.selection, doc, "sel"))
         for ly in doc.layers:
-            imgs += [ly.image, ly.mask]
-        for img in imgs:
+            items.append((ly.image, ly, "img"))
+            items.append((ly.mask, ly, "mask"))
+        for img, holder, kind in items:
             if img is None:
                 continue
             try:
                 if img.packed_file is None or img.is_dirty:
                     img.pack()
+                    if holder is not None:
+                        img["seam_packed_rev"] = int(getattr(holder, _REV_ATTR[kind]))
                     n += 1
             except Exception:
                 traceback.print_exc()
     return n
 
 
+def purge_orphan_images() -> int:
+    """Remove paint-owned images (marker ``seam_raster``) that no document references any more
+    (e.g. left behind by undoing the creation of a document or layer)."""
+    used = set()
+    for sc in bpy.data.scenes:
+        for doc in sc.seam.rasters:
+            used.update(i.name for i in (doc.composite, doc.selection, doc.sink) if i is not None)
+            for ly in doc.layers:
+                used.update(i.name for i in (ly.image, ly.mask) if i is not None)
+    n = 0
+    for img in list(bpy.data.images):
+        if img.get("seam_raster") and img.name not in used and img.library is None:
+            _remove_image(img)
+            n += 1
+    return n
+
+
 @persistent
 def _on_save_pre(*_args):
     try:
+        purge_orphan_images()
         for sc in bpy.data.scenes:
             pack_images(sc)
     except Exception:
         traceback.print_exc()
 
 
-@persistent
-def _on_undo_redo_load(*_args):
+def _after_history_jump() -> None:
     # composite pixels are not undo/load safe: forget which composite is stored so it is rebuilt once
     _cache_sigs.clear()
     _fingerprints.clear()
+    for sc in bpy.data.scenes:
+        for doc in sc.seam.rasters:
+            sync_paint_target(doc)  # the object mode may differ from the one the node selection was made in
+    _restart_paint_watch_if_needed()
+
+
+@persistent
+def _on_undo_redo(*_args):
     try:
-        for sc in bpy.data.scenes:
-            for doc in sc.seam.rasters:
-                sync_paint_target(doc)  # the object mode may differ from the one the node selection was made in
-        _restart_paint_watch_if_needed()
+        restore_pixels_after_undo()
+        _after_history_jump()
     except Exception:
         traceback.print_exc()
 
 
-_HANDLERS = (("save_pre", _on_save_pre), ("undo_post", _on_undo_redo_load),
-             ("redo_post", _on_undo_redo_load), ("load_post", _on_undo_redo_load))
+@persistent
+def _on_load_post(*_args):
+    try:
+        journal_clear()
+        mark_pixels_applied()
+        _after_history_jump()
+    except Exception:
+        traceback.print_exc()
+
+
+_HANDLERS = (("save_pre", _on_save_pre), ("undo_post", _on_undo_redo),
+             ("redo_post", _on_undo_redo), ("load_post", _on_load_post))
 
 
 # --------------------------------------------------------------------------- GUI paint watch
@@ -1342,13 +1552,23 @@ def resize_canvas(doc, width: int, height: int, anchor: str = "TOP_LEFT", scale_
         jobs.append((ly.image, convert(ly.image, (0, 0, 0, 0))))
         if ly.mask is not None:
             jobs.append((ly.mask, convert(ly.mask, (255, 255, 255, 255))))
+    for ly in doc.layers:  # undo restores the old size from these snapshots
+        snapshot_current(ly, "img")
+        if ly.mask is not None:
+            snapshot_current(ly, "mask")
     if doc.selection is not None:
+        snapshot_current(doc, "sel")
         _remove_image(doc.selection)
         doc.selection = None
         doc.has_selection = False
+        _applied.pop((doc.id, "sel"), None)
     for img, a8 in jobs:
         img.scale(width, height)
         write_image_srgb8(img, a8)
+    for ly in doc.layers:
+        commit_pixels(ly, "img", read_image_srgb8(ly.image))
+        if ly.mask is not None:
+            commit_pixels(ly, "mask", read_image_srgb8(ly.mask))
     doc.width, doc.height = width, height
     update_canvas_mesh(doc)
     _remove_image(doc.composite)
@@ -1357,7 +1577,7 @@ def resize_canvas(doc, width: int, height: int, anchor: str = "TOP_LEFT", scale_
         _bump(ly.id, "img")
         _bump(ly.id, "mask")
     build_material(doc)
-    update_composite(doc)
+    engine.mark_dirty(f"rastercache:{doc.id}")
     from . import selection
     selection.sync_stencil(doc)
 
@@ -1392,3 +1612,5 @@ def unregister():
     _fingerprints.clear()
     _cache_sigs.clear()
     _watching.clear()
+    _applied.clear()
+    journal_clear()

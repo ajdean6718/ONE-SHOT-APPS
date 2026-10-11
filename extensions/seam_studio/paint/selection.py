@@ -32,6 +32,7 @@ def _ensure_image(doc):
     img = doc.selection
     if img is not None and (int(img.size[0]), int(img.size[1])) != (w, h):
         rd._remove_image(img)
+        rd._applied.pop((doc.id, "sel"), None)
         img = None
     if img is None:
         img = rd._new_image(rd._image_name(doc.name, "selection"), w, h, "Non-Color", (0, 0, 0, 1))
@@ -53,6 +54,7 @@ def _write(doc, mask: np.ndarray) -> None:
     a8[..., 0] = a8[..., 1] = a8[..., 2] = v
     a8[..., 3] = 255
     rd.write_image_srgb8(img, a8)
+    rd.commit_pixels(doc, "sel", a8)
 
 
 def set_selection(doc, mask: Optional[np.ndarray], op: str = "REPLACE") -> bool:

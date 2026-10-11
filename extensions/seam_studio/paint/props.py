@@ -24,6 +24,8 @@ class SEAM_PG_RasterLayer(bpy.types.PropertyGroup):
     locked: BoolProperty(name="Locked", default=False)
     mask: PointerProperty(name="Mask", type=bpy.types.Image)
     mask_enabled: BoolProperty(name="Use Mask", default=True, update=_tag_raster)
+    rev: IntProperty(name="Pixel Revision", default=0, description="Revision of the layer pixels written by SEAM (undo journal key)")
+    mask_rev: IntProperty(name="Mask Revision", default=0, description="Revision of the mask pixels written by SEAM")
 
 
 class SEAM_PG_RasterDoc(bpy.types.PropertyGroup):
@@ -40,6 +42,8 @@ class SEAM_PG_RasterDoc(bpy.types.PropertyGroup):
                           description="1x1 image that receives native strokes while the active layer is locked")
     selection: PointerProperty(name="Selection Mask", type=bpy.types.Image)
     has_selection: BoolProperty(default=False)
+    sel_rev: IntProperty(name="Selection Revision", default=0,
+                         description="Revision of the selection pixels written by SEAM (undo journal key)")
     background: EnumProperty(name="Background", items=[("TRANSPARENT", "Transparent", ""), ("WHITE", "White", ""),
                                                        ("COLOR", "Color", "")], default="TRANSPARENT", update=_tag_raster)
     background_color: FloatVectorProperty(name="Background Color", subtype="COLOR", size=4, min=0.0, max=1.0,
