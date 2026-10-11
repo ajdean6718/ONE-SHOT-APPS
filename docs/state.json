@@ -1,6 +1,6 @@
 {
- "updated": "2026-10-11T01:55Z",
- "phase": "wave2 (connect, compositing, acceptance) + shell finishing",
+ "updated": "2026-10-11T04:40Z",
+ "phase": "wave3 merged; gui continuation + review r2 running",
  "integration_branch": "claude/nice-carson-jivgmv",
  "foundation": "contracts, engine, bridge, canvas foundation, test harness committed",
  "runtimes": {
@@ -41,29 +41,39 @@
   "shell": {
    "packet": "docs/tasks/shell.md",
    "branch": "seam/shell",
-   "status": "in review/fix (workflow wi938n4vn)"
+   "status": "merged"
   },
   "connect": {
    "packet": "docs/tasks/connect.md",
    "branch": "seam/connect",
    "base": "2c9bddf",
-   "status": "running"
+   "status": "merged"
   },
   "compositing": {
    "packet": "docs/tasks/compositing.md",
    "branch": "seam/compositing",
    "base": "2c9bddf",
-   "status": "running"
+   "status": "merged"
   },
   "acceptance": {
    "packet": "docs/tasks/acceptance.md",
    "branch": "seam/acceptance",
    "base": "2c9bddf",
-   "status": "running"
+   "status": "merged"
   },
   "gui": {
    "packet": "docs/tasks/gui.md",
-   "status": "pending (needs shell merge)"
+   "branch": "seam/gui",
+   "status": "running (continuation 2, base f55382a)"
+  },
+  "fix-paint": {
+   "status": "merged"
+  },
+  "fix-linkvec": {
+   "status": "merged"
+  },
+  "review-r2": {
+   "status": "running (wave3 verify, fidelity, robustness) on c8f674a"
   }
  },
  "next": [
@@ -73,12 +83,23 @@
   "package + clean-profile verification",
   "acceptance.md from evidence"
  ],
- "blockers": [],
+ "blockers": [
+  "account usage limit interrupted agents twice (02:50, ~04:00 UTC); work preserved and resumed"
+ ],
  "last_green": {
-  "commit": "ac00f1e",
-  "unit_py313": 442,
-  "unit_py312": "410+1skip",
-  "int52": "393+1skip",
-  "int40": "392+2skip"
- }
+  "commit": "c8f674a",
+  "unit_py313": 485,
+  "unit_py312": "453+1skip",
+  "int52": "556+4skip",
+  "int40": "555+5skip",
+  "acc52": "96+1xfail",
+  "acc40": "96+1xfail",
+  "gui": "5/5 (at 5eb9901)"
+ },
+ "open": [
+  "S3 xfail: cube added in Model after Canvas New lands in hidden SEAM layer (gui stream)",
+  "review r2 findings",
+  "GUI scenarios for paint/split/undo/packaged",
+  "docs/acceptance.md, perf.md regeneration, final package + clean-profile run"
+ ]
 }

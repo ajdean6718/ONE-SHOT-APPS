@@ -63,3 +63,13 @@ Preserved: gui WIP committed (4e71861); acceptance implementation+review merged 
 wave 3: fix-paint (Sonnet), fix-linkvec (Opus — undo/data-integrity), gui continuation (Sonnet). Each fix worker must
 reproduce a finding before fixing it (verification folded into the fix stage to save usage).
 Integrated build at ce8fbea: integration 515+1 skip (5.2.2) / 514+2 skip (4.0.2); acceptance 92 passed + 2 strict xfail (both runtimes).
+
+### Second usage-limit interruption (~03:50–04:20 UTC) and wave 3 results
+fix-linkvec (Opus) finished before the limit: all 9 assigned findings reproduced and fixed with regression tests; S8 xfail resolved;
+5.2.2 node-edit cost in a 500-shape document ~1000 ms → ~40 ms (engine per-pass index token). Its review stage was cut off.
+fix-paint finished 5 commits (stroke-safe undo of SEAM pixel ops, autosave packs raster pixels, paint-mode undo steps,
+independent Shift+D canvases) before the limit cut its final handoff. gui continuation interrupted again (WIP c28e1ab).
+Integrator follow-ups: decal freeze calls wired into paint remove/resize (regression tests fail without the fix);
+S10 duplicate-canvas test updated to the independent-document semantics.
+Integrated build c8f674a: unit 485 / 453+1; integration 556+4 skip (5.2.2) / 555+5 skip (4.0.2); acceptance 96 + 1 strict xfail (both).
+Resumed 04:30 UTC after the user confirmed the limit reset: gui continuation + lean review r2 (findings must carry their own repro).
