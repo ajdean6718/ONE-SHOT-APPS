@@ -370,6 +370,10 @@ def material_decal_problem(src, tgt) -> str:
         return "'%s' has no UV map: unwrap it first (UV Editing workspace)" % tgt.name
     if tgt.library is not None or tgt.data.library is not None:
         return "'%s' is linked from a library and cannot get a material slot" % tgt.name
+    for lk in bpy.context.scene.seam.links:
+        if lk.target == tgt and lk.state != "DETACHED" and not (lk.recipe == "DECAL" and not decal.owns_target_object(lk)):
+            return ("'%s' is a live 3D result: its link manages its materials. Use a Plane decal, "
+                    "or Bake (detach) the result first" % tgt.name)
     return ""
 
 
@@ -403,14 +407,15 @@ class SEAM_OT_make_3d(_LinkParamsMixin, bpy.types.Operator):
         if obj is None:
             cls.poll_message_set("Select a vector shape, text, group or raster layer")
             return False
+        if obj.seam.role in ("SHAPE", "TEXT", "RASTER", "GROUP"):
+            return True
+        # a mesh can be the *target* of a Material decal when artwork is selected next to it (a live 3D
+        # result is refused by the operator with an explanation)
+        if obj.type == "MESH" and any(is_decal_source(o) for o in context.selected_objects):
+            return True
         if obj.seam.role in L.DERIVED_ROLES:
             cls.poll_message_set("Generated objects cannot be used as a source")
             return False
-        if obj.seam.role in ("SHAPE", "TEXT", "RASTER", "GROUP"):
-            return True
-        # a plain mesh can be the *target* of a Material decal when artwork is selected next to it
-        if obj.type == "MESH" and any(is_decal_source(o) for o in context.selected_objects):
-            return True
         cls.poll_message_set("Make 3D needs a SEAM vector shape, text, group or raster layer "
                              "(a Material decal also needs the mesh selected)")
         return False

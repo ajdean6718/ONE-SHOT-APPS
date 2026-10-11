@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from helpers import flush, save_and_reload
-from test_link_support import SQUARE, HOLE, activate, make_shape
+from test_link_support import SQUARE, HOLE, activate, make_link, make_shape
 from test_vector_b_common import add_rect, poly_path, select, srgb8
 
 RED = (0.8, 0.1, 0.05, 1.0)
@@ -356,7 +356,8 @@ def test_material_decal_never_rewrites_the_target_mesh(engine):
     src = add_rect(bpy.context.scene, "Art", 0, 0, 100, 100, color=RED)
     cube = add_mesh_with_uv()
     base_mat = bpy.data.materials.new("Base")
-    base_mat.use_nodes = True
+    if base_mat.node_tree is None:
+        base_mat.use_nodes = True
     cube.data.materials.append(base_mat)
     cube.data.polygons[0].select = True
     mesh_before = mesh_sig(cube)
@@ -449,9 +450,19 @@ def test_material_decal_requirements_are_explained(engine):
     with pytest.raises(RuntimeError, match="no UV map"):
         bpy.ops.seam.make_3d(recipe="DECAL", decal_mode="MATERIAL")
     assert len(bare.data.materials) == 0 and not len(bpy.context.scene.seam.links)
-    # a 3D result cannot be the artwork, a mesh alone cannot be the source
+    # a mesh alone cannot be the source
     select(bare)
     assert not bpy.ops.seam.make_3d.poll()
+    # a live 3D result owns its face materials (the recipe rewrites them): refused until it is baked
+    other = make_shape("Other", location=(900, 0))
+    res_link = make_link(other, "EXTRUDE")
+    select(src, res_link.target)
+    with pytest.raises(RuntimeError, match="live 3D result"):
+        bpy.ops.seam.make_3d(recipe="DECAL", decal_mode="MATERIAL")
+    activate(res_link.target)
+    assert bpy.ops.seam.link_detach() == {"FINISHED"}
+    select(src, res_link.target)
+    assert bpy.ops.seam.make_3d(recipe="DECAL", decal_mode="MATERIAL", decal_resolution=32) == {"FINISHED"}
     # target explicitly by name works without selecting it
     cube = add_mesh_with_uv("Named", (8, 0, 0))
     activate(src)
@@ -520,9 +531,13 @@ def test_decal_survives_save_and_reopen_without_rerender(engine, blend_path):
     flush()
     assert link.build_count == n + 1 and link.decal_image == img
     assert at(link, (0, 0, 100, 100), 50, 50) == srgb8(BLUE)
-    # second round trip keeps the new pixels
+    # a packed image is rescaled in place as well, and a second round trip keeps the new size and pixels
+    link.params.decal_resolution = 48
+    flush()
+    assert tuple(link.decal_image.size) == (48, 48) and link.decal_image == img
     scene = save_and_reload(blend_path)
     link = next(lk for lk in scene.seam.links if lk.id == lid)
+    assert tuple(link.decal_image.size) == (48, 48) and link.decal_image.packed_file is not None
     assert at(link, (0, 0, 100, 100), 50, 50) == srgb8(BLUE)
 
 

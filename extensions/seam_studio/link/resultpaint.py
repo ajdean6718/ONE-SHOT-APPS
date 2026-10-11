@@ -171,33 +171,18 @@ def setup(obj, size: int = 1024):
     mats = paint_materials(obj)
     if not mats:
         mat = bpy.data.materials.new("SEAM Paint")
-        mat.use_nodes = True
+        if mat.node_tree is None:
+            mat.use_nodes = True  # 4.x: materials start without nodes (5.x: always node based)
         me.materials.append(mat)
         mats = [mat]
     for mat in mats:
         _wire_material(mat, img)
     if obj.active_material_index >= len(mats) or obj.active_material is None:
         obj.active_material_index = 0
-    am = obj.active_material
-    if am is not None:
-        try:
-            refresh_slots(obj)
-            names = [t.image.name if t.image else "" for t in am.texture_paint_images]
-            if img.name in names:
-                am.paint_active_slot = names.index(img.name)
-        except (AttributeError, RuntimeError, ReferenceError):
-            pass
+    # Blender derives the texture-paint slots from the image-texture nodes when Texture Paint mode is entered;
+    # the paint node is the active node of every material, so it is the active slot of each of them.
     return {"uv_map": uv_name, "uv_created": uv_created, "image": img, "image_created": created_image,
             "materials": mats}
-
-
-def refresh_slots(obj) -> None:
-    """Make Blender rebuild the texture-paint slot list of the object's materials."""
-    obj.data.update()
-    try:
-        bpy.context.view_layer.update()
-    except Exception:
-        pass
 
 
 def enter_texture_paint(context, obj) -> Optional[str]:
