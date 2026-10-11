@@ -810,19 +810,33 @@ def _find_view3d(context):
     return area, region, space
 
 
-def frame_rect_in_view(scene, region, space, rect, margin: float = 0.9) -> bool:
+def frame_rect_in_view(scene, area, region, space, rect, margin: float = 0.9) -> bool:
     """Set a top orthographic view centred on canvas-local ``rect`` so that it fits ``region``."""
     from ..bridge import canvas_matrix
     r3d = space.region_3d
     minx, miny, maxx, maxy = rect
     cx, cy = (minx + maxx) * 0.5, (miny + maxy) * 0.5
+    prefs = bpy.context.preferences.view
+    smooth = prefs.smooth_view
+    try:  # proper "Top Orthographic" view, applied instantly (an animated view would overwrite the values below)
+        prefs.smooth_view = 0
+        with bpy.context.temp_override(area=area, region=region):
+            bpy.ops.view3d.view_axis(type="TOP", align_active=False)
+    except (RuntimeError, TypeError):
+        pass
+    finally:
+        prefs.smooth_view = smooth
     r3d.view_perspective = "ORTHO"
     r3d.view_rotation = (1.0, 0.0, 0.0, 0.0)  # looking down -Z from +Z (top view)
     r3d.view_location = canvas_matrix(scene) @ Vector((cx, cy, 0.0))
+    try:  # parenting every artwork object to the canvas root would draw long relationship lines
+        space.overlay.show_relationship_lines = False
+    except AttributeError:
+        pass
     w = max(maxx - minx, 1e-3)
     h = max(maxy - miny, 1e-3)
-    # ortho: visible width (units) along the window's larger dimension = view_distance * sensor / lens
-    # (sensor = 72 for the 3D view's default fit); calibrated empirically in the GUI test.
+    # ortho: visible extent along the larger region side = view_distance * 72 / lens (verified in the GUI
+    # test: the artboard fills 90% of the viewport after this call).
     rw, rh = max(region.width, 1), max(region.height, 1)
     units_per_px = max(w / (rw * margin), h / (rh * margin))
     visible_larger = units_per_px * max(rw, rh)
@@ -853,7 +867,7 @@ class SEAM_OT_view_artboard(bpy.types.Operator):
         if ab is None:
             self.report({"WARNING"}, "No artboard in this document")
             return {"CANCELLED"}
-        frame_rect_in_view(scene, region, space, artboard_rect(ab))
+        frame_rect_in_view(scene, area, region, space, artboard_rect(ab))
         area.tag_redraw()
         return {"FINISHED"}
 

@@ -82,7 +82,7 @@ def test_artboard_resize_via_props_regenerates_mesh_and_material(seam, engine):
     ab.seam.artboard.background_enabled = False
     flush()
     assert mat.node_tree.nodes["SEAM_mix"].inputs[0].default_value == pytest.approx(0.0)
-    assert ab.display_type == "WIRE"
+    assert ab.display_type == "WIRE"  # artboard planes are flat: wire shows only the frame
     # second flush without edits is idempotent
     assert all(r.status in ("skipped", "obsolete") for r in flush() if r.key.startswith("artboard:"))
 

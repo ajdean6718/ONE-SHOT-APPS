@@ -246,11 +246,11 @@ def _make_tool(kind: str, label: str, icon: str, extra_props: Tuple[str, ...]):
 
 
 _TOOL_SPECS = (
-    ("RECT", "Rectangle", "ops.mesh.primitive_cube_add_gizmo", ()),
+    ("RECT", "Rectangle", "ops.gpencil.primitive_box", ()),
     ("ROUNDED_RECT", "Rounded Rectangle", "ops.mesh.primitive_cube_add_gizmo", ("radius",)),
-    ("ELLIPSE", "Ellipse", "ops.mesh.primitive_circle_add_gizmo", ()),
-    ("POLYGON", "Polygon", "ops.mesh.primitive_cone_add_gizmo", ("sides",)),
-    ("STAR", "Star", "ops.mesh.primitive_uv_sphere_add_gizmo", ("sides", "inner_ratio")),
+    ("ELLIPSE", "Ellipse", "ops.gpencil.primitive_circle", ()),
+    ("POLYGON", "Polygon", "ops.gpencil.primitive_polyline", ("sides",)),
+    ("STAR", "Star", "ops.mesh.primitive_cone_add_gizmo", ("sides", "inner_ratio")),
     ("LINE", "Line", "ops.gpencil.primitive_line", ()),
     ("ARTBOARD", "Artboard", "ops.mesh.primitive_grid_add_gizmo", ()),
 )

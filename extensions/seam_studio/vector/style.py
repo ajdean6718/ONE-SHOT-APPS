@@ -4,11 +4,14 @@ Everything here is derived from ``obj.seam.style`` (single owner of appearance) 
 
 * ``MaterialProducer`` ("material", priority 20): material "SEAM <name>" in slot 0 with the node tree
   Emission (flat colour) mixed with Transparent by ``alpha * opacity``; the viewport display colour
-  (Solid / Material colour) is the fill colour; a disabled fill switches the object to wire display.
+  (Solid / Material colour) is the fill colour (gradients: the colour at the midpoint); a disabled fill is
+  alpha 0 (wire display would draw the fill triangulation).
 * ``GradientProducer`` ("gradient", priority 25): bakes the linear / radial gradient into an 8-bit sRGB
   image (gradient parameters live in bounding-box-relative space, so resizing a shape needs no
   re-bake) used through Texture Coordinate(Object) -> Mapping -> Image Texture over the shape bbox; the
-  image node is the active node so Solid > Texture colour shows it.
+  image node is the active node. NOTE: Solid > Texture colour does NOT map a gradient over a curve fill
+  (Blender gives curve fills UV v = 0, u along the path); use Solid > Material colour (midpoint colour) or
+  Material Preview / Rendered for the true gradient.
 * ``StrokeProducer`` ("stroke", priority 30): child mesh object (role STROKE) built by
   ``seam_core.stroke.stroke_mesh`` from the flattened local paths. The geometry is built in the space of
   the owner's 2D scale/shear so the stroke keeps a uniform width when the owner is scaled.
@@ -176,12 +179,23 @@ def _stops(style) -> List[Tuple[float, Tuple[float, float, float, float]]]:
     return stops
 
 
+def gradient_display_color(style) -> Tuple[float, float, float, float]:
+    """Colour shown for a gradient fill in Solid > Material colour mode: the gradient at its midpoint.
+
+    (Solid > Texture colour cannot map a curve fill over its bounding box: Blender gives curve fills
+    UV v = 0 and u along the path. Material Preview / Rendered and exports show the true gradient.)
+    """
+    stops = _stops(style)
+    pos = [s[0] for s in stops]
+    return tuple(float(np.interp(0.5, pos, [s[1][i] for s in stops])) for i in range(4))
+
+
 def material_signature(ob) -> str:
     st = ob.seam.style
     mat = _owned_material(ob)
     has_grad = bool(mat is not None and mat.node_tree is not None and "SEAM_gradient" in mat.node_tree.nodes)
     flat_ok = bool(mat is not None and mat.node_tree is not None and "SEAM_mix" in mat.node_tree.nodes)
-    first = _rgba(_stops(st)[0][1]) if st.fill_type != "SOLID" else ()
+    first = _rgba(gradient_display_color(st)) if st.fill_type != "SOLID" else ()
     return repr((ob.name, bool(st.fill_enabled), st.fill_type, _rgba(st.fill_color), _r(st.opacity), first,
                  mat is not None, flat_ok, has_grad == (st.fill_type != "SOLID")))
 
@@ -194,14 +208,14 @@ def sync_material(ob) -> bpy.types.Material:
     if gradient:
         nodes = _ensure_gradient_nodes(mat)
         nodes["alpha"].inputs[1].default_value = float(st.opacity) if st.fill_enabled else 0.0
-        base = _stops(st)[0][1]
+        base = gradient_display_color(st)
         canvas.set_flat_color(mat, base, 1.0, st.fill_enabled)
-        mat.diffuse_color = (base[0], base[1], base[2], 1.0 if st.fill_enabled else 0.0)
+        mat.diffuse_color = (base[0], base[1], base[2], base[3] * float(st.opacity) if st.fill_enabled else 0.0)
     else:
         canvas.flat_material_tree(mat)
         _remove_gradient_nodes(mat.node_tree)
         canvas.set_flat_color(mat, tuple(st.fill_color), float(st.opacity), bool(st.fill_enabled))
-    ob.display_type = "TEXTURED" if st.fill_enabled else "WIRE"
+    ob.display_type = "TEXTURED"  # WIRE would draw the fill triangulation; a disabled fill is alpha 0 instead
     return mat
 
 

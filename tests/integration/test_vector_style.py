@@ -84,7 +84,8 @@ def test_material_is_created_and_follows_style_edits(doc):
     st.fill_enabled = False
     flush()
     assert _mix_alpha(mat) == pytest.approx(0.0)
-    assert ob.display_type == "WIRE"
+    assert mat.diffuse_color[3] == pytest.approx(0.0)  # invisible in Solid view too (no wire triangulation)
+    assert ob.display_type == "TEXTURED"
     st.fill_enabled = True
     flush()
     assert ob.display_type == "TEXTURED" and _mix_alpha(mat) == pytest.approx(0.25)
@@ -162,6 +163,8 @@ def test_linear_gradient_end_pixels_equal_stop_colours(doc):
     assert np.allclose(px[0], px[-1])
     # material wiring: image is the active node and feeds the emission
     mat = _mat(ob)
+    mid = _srgb_decode(px[px.shape[0] // 2, px.shape[1] // 2, :3])
+    assert tuple(mat.diffuse_color)[:3] == pytest.approx((0.5, 0.0, 0.5), abs=1e-4)  # Solid view: midpoint colour
     tex = mat.node_tree.nodes["SEAM_gradient"]
     assert tex.image == img and mat.node_tree.nodes.active == tex
     link = [l for l in mat.node_tree.links if l.to_node.name == "SEAM_emission" and l.to_socket.name == "Color"]
