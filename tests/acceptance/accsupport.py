@@ -153,16 +153,32 @@ def mesh_volume(ob):
     return vol
 
 
-def is_closed_manifold(ob):
-    """Every edge is shared by exactly two faces."""
+def welded_topology(ob, decimals=6):
+    """(V, E, F, edge_use) after welding vertices that share a position (SEAM meshes may split corners)."""
     me = ob.data
-    counts = {}
+    co = mesh_np(ob)
+    keys = {}
+    ids = np.empty(len(co), dtype=np.int64)
+    for i, c in enumerate(np.round(co, decimals)):
+        ids[i] = keys.setdefault((c[0] + 0.0, c[1] + 0.0, c[2] + 0.0), len(keys))
+    use = {}
     for p in me.polygons:
-        v = list(p.vertices)
+        v = [int(ids[i]) for i in p.vertices]
         for i in range(len(v)):
             e = (min(v[i], v[(i + 1) % len(v)]), max(v[i], v[(i + 1) % len(v)]))
-            counts[e] = counts.get(e, 0) + 1
-    return bool(counts) and all(c == 2 for c in counts.values())
+            use[e] = use.get(e, 0) + 1
+    return len(keys), len(use), len(me.polygons), use
+
+
+def is_closed_manifold(ob):
+    """Every edge of the welded mesh is shared by exactly two faces."""
+    _v, _e, _f, use = welded_topology(ob)
+    return bool(use) and all(c == 2 for c in use.values())
+
+
+def euler_characteristic(ob):
+    v, e, f, _use = welded_topology(ob)
+    return v - e + f
 
 
 def polygon_area_xy(ring):
