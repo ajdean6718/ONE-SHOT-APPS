@@ -584,3 +584,53 @@ def test_orphan_gradient_image_is_purged_by_revalidation(doc):
     core.request_revalidate()
     flush()
     assert bpy.data.images.get("SEAM Gradient " + sid) is None
+
+
+def _grad_px(ob):
+    from seam_studio.vector import style
+    img = bpy.data.images[style.gradient_image_name(ob)]
+    buf = np.empty(len(img.pixels), np.float32)
+    img.pixels.foreach_get(buf)
+    return buf.reshape(style.GRADIENT_SIZE, style.GRADIENT_SIZE, 4)
+
+
+def _grad_expected(ob):
+    from seam_studio.vector import style
+    st = ob.seam.style
+    return style.bake_gradient(st.fill_type, st.gradient_angle, tuple(st.gradient_center), st.gradient_radius,
+                               style._stops(st))
+
+
+def test_undo_of_a_gradient_stop_edit_restores_the_gradient_pixels(doc):
+    """Review finding (5.2.2): memfile undo restored the stops and the image's hash but kept the re-baked buffer."""
+    bpy.ops.ed.undo_push(message="start")
+    ob = _rect()
+    name = ob.name
+    st = ob.seam.style
+    st.fill_type = "LINEAR"
+    st.gradient_stops.clear()
+    a = st.gradient_stops.add()
+    a.position, a.color = 0.0, (1.0, 0.0, 0.0, 1.0)
+    b = st.gradient_stops.add()
+    b.position, b.color = 1.0, (0.0, 0.0, 1.0, 1.0)
+    flush()
+    bpy.ops.ed.undo_push(message="gradient red-blue")
+    bpy.data.objects[name].seam.style.gradient_stops[0].color = (0.0, 1.0, 0.0, 1.0)
+    flush()
+    bpy.ops.ed.undo_push(message="stop0 green")
+    assert np.allclose(_grad_px(bpy.data.objects[name]), _grad_expected(bpy.data.objects[name]), atol=1 / 255)
+    assert bpy.ops.ed.undo() == {"FINISHED"}
+    flush()
+    ob = bpy.data.objects[name]
+    assert tuple(ob.seam.style.gradient_stops[0].color) == pytest.approx((1.0, 0.0, 0.0, 1.0))
+    assert np.allclose(_grad_px(ob), _grad_expected(ob), atol=1 / 255)
+    assert tuple(_grad_px(ob)[64, 0]) == pytest.approx((1.0, 0.0, 0.0, 1.0), abs=1 / 255)
+    assert bpy.ops.ed.redo() == {"FINISHED"}
+    flush()
+    ob = bpy.data.objects[name]
+    assert np.allclose(_grad_px(ob), _grad_expected(ob), atol=1 / 255)
+    # nothing changed since: a further revalidation verifies without re-baking
+    from seam_studio.engine import core
+    core.request_revalidate()
+    res = flush()
+    assert all(r.status != "ok" for r in res if r.key.startswith("gradient"))

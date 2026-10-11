@@ -172,11 +172,12 @@ def test_painted_result_keeps_following_the_source(engine):
     face = tgt.data.materials[0]
     bsdf = next(n for n in face.node_tree.nodes if n.type == "BSDF_PRINCIPLED")
     assert tuple(bsdf.inputs["Base Color"].default_value) == pytest.approx((0.1, 0.9, 0.3, 1.0), abs=1e-5)
+    assert link.build_count == 1  # a colour-only change recolours the materials, it never rewrites the mesh
     # topology/geometry change: link stays LIVE (painting is not a mesh edit), UVs are deterministic,
     # image and nodes survive, painted texels are untouched
     move_point(a, 0, 1, dx=100.0)
     flush()
-    assert link.state == "LIVE" and link.build_count == 3
+    assert link.state == "LIVE" and link.build_count == 2
     assert paint_image_of(tgt) == img
     out = np.empty(32 * 32 * 4, np.float32)
     img.pixels.foreach_get(out)

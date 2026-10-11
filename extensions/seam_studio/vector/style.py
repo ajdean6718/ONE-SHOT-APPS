@@ -16,6 +16,12 @@ Everything here is derived from ``obj.seam.style`` (single owner of appearance) 
   ``seam_core.stroke.stroke_mesh`` from the flattened local paths. The geometry is built in the space of
   the owner's 2D scale/shear so the stroke keeps a uniform width when the owner is scaled.
 
+Gradient pixels and undo: Blender 5.x memfile undo restores an image's properties (``seam_hash``, the owner's
+stored signature) but keeps the in-memory pixel buffer, which may hold colours baked *after* the restored step.
+The pixels are therefore validated in memory (``_gradient_applied``: owner id -> digest of the gradient the
+buffer was checked or baked for), forgotten on undo / redo / load; the next flush compares the buffer with a
+fresh bake and re-bakes only when it differs.
+
 Gradient angle: 0 = left to right, 90 degrees = bottom to top (canvas Y up). Radial: ``gradient_center``
 and ``gradient_radius`` are fractions of the bounding box (an ellipse for non-square shapes).
 """
@@ -319,6 +325,18 @@ def bake_gradient(fill_type: str, angle: float, center, radius: float, stops, si
     return np.round(out * 255.0).astype(np.float32) / 255.0
 
 
+_gradient_applied: Dict[str, str] = {}  # owner id -> digest whose pixels are known to be in the image buffer
+
+
+def gradient_digest(st) -> str:
+    return hashlib.blake2b(repr(_gradient_params(st)).encode(), digest_size=8).hexdigest()
+
+
+def forget_gradient_pixels() -> None:
+    """Undo / redo / load: the image buffers may not match the restored properties any more."""
+    _gradient_applied.clear()
+
+
 def gradient_image_name(ob) -> str:
     return "SEAM Gradient " + ob.seam.id
 
@@ -355,8 +373,7 @@ def sync_gradient(ob, depsgraph=None) -> None:
     sync_material(ob)
     mat = _owned_material(ob)
     nodes = _ensure_gradient_nodes(mat)
-    params = _gradient_params(st)
-    digest = hashlib.blake2b(repr(params).encode(), digest_size=8).hexdigest()
+    digest = gradient_digest(st)
     if img is not None and (tuple(img.size) != (GRADIENT_SIZE, GRADIENT_SIZE)):
         bpy.data.images.remove(img)
         img = None
@@ -367,16 +384,23 @@ def sync_gradient(ob, depsgraph=None) -> None:
         img["seam_owner"] = ob.seam.id
         img.alpha_mode = "STRAIGHT"
         img["seam_hash"] = ""
-    if img.get("seam_hash") != digest or not img.has_data:
+    if img.get("seam_hash") != digest or not img.has_data or _gradient_applied.get(ob.seam.id) != digest:
         arr = bake_gradient(st.fill_type, st.gradient_angle, tuple(st.gradient_center), st.gradient_radius,
-                            _stops(st))
-        img.pixels.foreach_set(arr.ravel())
-        img.update()
-        img["seam_hash"] = digest
-        try:
-            img.pack()
-        except RuntimeError:
-            pass
+                            _stops(st)).ravel()
+        same = False
+        if img.get("seam_hash") == digest and img.has_data:  # after undo/load: verify the buffer, re-bake on mismatch
+            cur = np.empty(arr.size, dtype=np.float32)
+            img.pixels.foreach_get(cur)
+            same = bool(np.allclose(cur, arr, atol=0.5 / 255.0))
+        if not same:
+            img.pixels.foreach_set(arr)
+            img.update()
+            img["seam_hash"] = digest
+            try:
+                img.pack()
+            except RuntimeError:
+                pass
+        _gradient_applied[ob.seam.id] = digest
     nodes["gradient"].image = img
     mat.node_tree.nodes.active = nodes["gradient"]
     bb = local_bbox(ob, depsgraph)
@@ -423,7 +447,11 @@ class GradientProducer(engine.Producer):
 
     def stored_signature(self, scene, key):
         ob = self._obj(scene, key)
-        return None if ob is None else canvas.get_sig(ob, "gradient")
+        if ob is None:
+            return None
+        if ob.seam.style.fill_type != "SOLID" and _gradient_applied.get(ob.seam.id) != gradient_digest(ob.seam.style):
+            return None  # pixel buffer not verified since the last undo / redo / load (or never baked here)
+        return canvas.get_sig(ob, "gradient")
 
     def build(self, scene, key, signature):
         ob = self._obj(scene, key)
@@ -820,11 +848,29 @@ classes = (SEAM_OT_gradient_stop_add, SEAM_OT_gradient_stop_remove, SEAM_OT_grad
 _producers = (MaterialProducer(), GradientProducer(), StrokeProducer())
 
 
+@bpy.app.handlers.persistent
+def _on_history_or_load(*_args):
+    forget_gradient_pixels()
+
+
+_HANDLER_LISTS = ("undo_post", "redo_post", "load_post")
+
+
 def register():
     for p in _producers:
         engine.register_producer(p)
+    for name in _HANDLER_LISTS:
+        lst = getattr(bpy.app.handlers, name)
+        if _on_history_or_load not in lst:
+            lst.append(_on_history_or_load)
+    forget_gradient_pixels()
 
 
 def unregister():
     for p in _producers:
         engine.unregister_producer(p.kind)
+    for name in _HANDLER_LISTS:
+        lst = getattr(bpy.app.handlers, name)
+        while _on_history_or_load in lst:
+            lst.remove(_on_history_or_load)
+    forget_gradient_pixels()

@@ -249,11 +249,6 @@ def test_undo_of_a_fill_colour_change_recolours_the_result(seam, engine):
     assert colour(tgt) == pytest.approx((0.1, 0.7, 0.2, 1.0), abs=1e-4)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: after Pause -> Resume, undoing a source fill-colour change reverts the 2D fill "
-                   "but leaves the 3D result's Face/Side material colours at the new value: memfile undo does not restore "
-                   "the Material (it was changed by the engine after the undo push) and the restored link signatures "
-                   "match, so no rebuild re-syncs it. Fix: link/producer.py must re-sync link materials after "
-                   "undo/redo regardless of the geometry signature. Owner: connect. See REQUESTS.")
 def test_undo_of_a_fill_colour_change_after_pause_resume(seam, engine):
     src, lid, tgt = build()
     select(obj(tgt))
