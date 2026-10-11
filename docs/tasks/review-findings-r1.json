@@ -1,0 +1,155 @@
+[
+ {
+  "title": "Undo of a SEAM pixel op wipes natively painted strokes; after reopening a file, it does not restore pixels at all",
+  "severity": "blocker",
+  "files": [
+   "/home/user/seam-wt/review/extensions/seam_studio/paint/rasterdoc.py"
+  ],
+  "scenario": "(a) Same session: Paint > New Raster Document, enter Texture Paint, paint brush strokes on Layer 1, then run Fill (seam.raster_fill) or Clear on that layer and press Ctrl+Z. (b) After a reopen: paint natively, or write pixels with any SEAM op, save, close, reopen, run Fill, press Ctrl+Z. Native strokes never bump layer.rev, so the layer stays at rev 0. commit_pixels() journals only the new revision and never snapshots the pixels it replaces. load_post also clears the journal. On undo, restore_pixels_after_undo() finds no journal entry for the restored revision. At rev 0 it writes _default_pixels (fully transparent) over the layer. At rev > 0 it leaves the post-fill pixels in place and shows a false 'undo history memory limit was reached' warning. The same commit path is used by every SEAM layer, mask and selection write: fill, clear, merge-down into the lower layer, add/apply mask, import.",
+  "evidence": "GUI, Blender 4.0.2: a real bpy.ops.paint.image_paint stroke gave 2178 painted px with rev 0. raster_fill set rev 1 with 65536 opaque px. Undo: after Blender's own memfile undo, the layer still had 65536 opaque px. SEAM's undo handler then rewrote 1 image to the rev-0 default, leaving 0 non-transparent px and warning ''. The stroke is gone (expected: 2178 stroke px). Headless after reload (5.2.2 and 4.0.2): with native-style pixels saved at rev 0, fill+undo gives pixel [0,0,0,0] (expected the saved red). With SEAM-written pixels saved at rev 1, fill+undo leaves the blue fill [0,0,255,255] with rev back to 1 and the warning 'Undo restored the settings but not the pixels of 1 image(s): the undo history memory limit was reached', although no memory limit was involved.",
+  "repro": "artifacts/review/data-integrity/gui/gui_stroke_undo.py (xvfb-run blender --factory-startup --python ...; result in gui/stroke_undo.json); artifacts/review/data-integrity/test_raster_undo_after_reload.py (both tests fail on int52 and on int40 via scripts/blender_pytest.py)",
+  "suggested_fix": "Before any SEAM write replaces an image's pixels, journal the pixels it is about to overwrite under the holder's current revision when that key is missing. For example, at the top of write_layer_array_srgb8 / write_mask_array / the selection write, call `if (holder.id, kind, rev) not in _journal: _journal_put((holder.id, kind, rev), read_image_srgb8(img))`, or do this inside commit_pixels before the write. Never fall back to _default_pixels unless the image is known to still hold initial content. Make the eviction warning text depend on whether an entry was actually evicted."
+ },
+ {
+  "title": "Autosave / Recover drops all raster layer pixels: recovered layers come back opaque black",
+  "severity": "major",
+  "files": [
+   "/home/user/seam-wt/review/extensions/seam_studio/paint/rasterdoc.py",
+   "/home/user/seam-wt/review/extensions/seam_studio/link/lifecycle.py"
+  ],
+  "scenario": "Layer, mask, selection and decal images are packed only in save_pre (rasterdoc._on_save_pre, lifecycle._on_save_pre). Blender's autosave writes the active memfile undo step without running save_pre, and so does quit.blend / Recover Last Session. Steps: New Raster Document, paint or fill, keep working until autosave fires (crash before saving), then File > Recover > Auto Save. Generated layer images carry no pixels in the memfile, so every layer reloads as a blank generated image. The layer records (rev numbers, names, opacity) survive, and mark_pixels_applied() trusts them.",
+  "evidence": "GUI, Blender 4.0.2, auto_save_time=1: raster_new and raster_fill (undo pushed) gave layer pixel [0,0,255,255] with rev 2. Opening the resulting <pid>_autosave.blend with the add-on gave 'rev 2 packed False source GENERATED px [0, 0, 0, 255]'. The painted layer is lost and replaced by opaque black.",
+  "repro": "artifacts/review/data-integrity/gui/gui_autosave.py (env SEAM_AUTOSAVE_DIR, waits for the autosave) followed by blender -b --python artifacts/review/data-integrity/gui/check_autosave.py",
+  "suggested_fix": "Make sure the memfile that autosave writes holds packed pixels. Pack (or re-pack) SEAM images when a SEAM pixel write commits (commit_pixels already handles a full buffer), and when the paint watch sees the canvas leave Texture Paint. Optionally add a timer that packs dirty seam_raster/seam_decal images more often than the autosave interval. Set img['seam_packed_rev'] at the same time so _content_rev() stays consistent."
+ },
+ {
+  "title": "Baked (detached) raster decal keeps following the raster document and loses its texture when the doc is resized or deleted",
+  "severity": "major",
+  "files": [
+   "/home/user/seam-wt/review/extensions/seam_studio/link/ops.py",
+   "/home/user/seam-wt/review/extensions/seam_studio/link/decal.py",
+   "/home/user/seam-wt/review/extensions/seam_studio/paint/rasterdoc.py"
+  ],
+  "scenario": "A raster decal shares doc.composite as its image (decal.share_raster_image). SEAM_OT_link_detach ('keep its geometry and stop following the source') and remove_link only clear seam_link_id; the result material still points at doc.composite. Painting the doc afterwards changes the baked result. resize_canvas() and remove_doc() call bpy.data.images.remove(doc.composite), so a baked or MISSING_SOURCE result is left with an empty image node. MISSING_SOURCE is supposed to keep the result.",
+  "evidence": "5.2.2 and 4.0.2: after Detach, writing blue to the layer gives a result texel of [0,0,255,255] (expected the baked [200,30,20,255]); the node image is still doc.composite. After resize_canvas(16,4) the baked result's 'SEAM Decal Image' node image is None. After seam.raster_remove the link is MISSING_SOURCE, with node image None and decal_image None.",
+  "repro": "artifacts/review/data-integrity/test_raster_decal_bake.py (3 failing tests on int52 and int40)",
+  "suggested_fix": "On detach and on remove_link of a raster DECAL, copy the composite: `img = link.decal_image.copy(); img.pack(); del img['seam_raster']; img[IMAGE_PROP]=link.id`, then point the material node and link.decal_image at the copy. In remove_doc and resize_canvas, do the same for every link whose decal_image is doc.composite before removing the old composite, or keep the old image while any material uses it."
+ },
+ {
+  "title": "Result linked into a second scene gets its RESULT role and owner stripped; Plane decal turns into a Material decal",
+  "severity": "major",
+  "files": [
+   "/home/user/seam-wt/review/extensions/seam_studio/link/lifecycle.py"
+  ],
+  "scenario": "dedupe_ids(scene) builds `targets` only from the current scene's links and calls make_independent() on every RESULT in that scene that those links do not target. Steps: create a link in scene A, link its result into scene B (Object > Link/Transfer to Scene, or a shared collection), switch the window to B and add or delete any object. The handler runs for B and sets role NONE and owner_id '' on the result, which persists in A. For a PLANE decal, decal.mode_of() then returns MATERIAL: Overwrite, Branch and Duplicate are disabled, and remove_link(delete_result) no longer deletes the plane. For extrude results the owner/role metadata is lost.",
+  "evidence": "GUI, Blender 4.0.2: before, role RESULT with owner == link.id. After switching to B and adding an Empty, then back to A: after_role NONE, after_owner '', mode MATERIAL, still MATERIAL after a source edit. Headless (simulating the handler for B): overwrite poll False, duplicate poll False.",
+  "repro": "artifacts/review/data-integrity/gui/gui_scene_b.py (result in gui/scene_b.json); artifacts/review/data-integrity/test_link_other_scene.py",
+  "suggested_fix": "In dedupe_ids, collect targets (and owner link ids) across all scenes: `targets = {lk.target.as_pointer() for sc in bpy.data.scenes for lk in sc.seam.links if lk.target}`. Only make a RESULT independent when no scene's link targets it and no link id in any scene equals its owner_id."
+ },
+ {
+  "title": "Shift+D copy of a result is made 'independent' but stays colour-synced to the source",
+  "severity": "minor",
+  "files": [
+   "/home/user/seam-wt/review/extensions/seam_studio/link/lifecycle.py"
+  ],
+  "scenario": "Select a live result and press Shift+D. lifecycle.make_independent() sets role NONE and copies the mesh only if it is shared. The default Shift+D shares the materials, so the copy keeps the 'Face'/'Side' materials tagged seam_link_id=<link>. Recolouring the source then recolours the 'independent' copy. A colour the user sets on the copy's material is reverted by the next build of the original. branch_copy() does copy these materials and clear the tag, so the two paths behave differently.",
+  "evidence": "5.2.2: the copy has role NONE and its own mesh, with mats [('Face','9234\u2026'),('Side','9234\u2026')]. After the source fill changes to blue, the copy's Face diffuse goes from (0.8,0.2,0.1,1) to (0,0,1,1).",
+  "repro": "artifacts/review/data-integrity/test_dup_result_material.py",
+  "suggested_fix": "In make_independent(), apply the same material handling as branch_copy: for each slot whose material has seam_link_id set, assign `m2 = mat.copy(); m2['seam_link_id'] = ''` to the copy."
+ },
+ {
+  "title": "Linked-copy scene: false 'mesh was edited' CONFLICT on the original scene's link",
+  "severity": "minor",
+  "files": [
+   "/home/user/seam-wt/review/extensions/seam_studio/link/producer.py",
+   "/home/user/seam-wt/review/extensions/seam_studio/link/lifecycle.py"
+  ],
+  "scenario": "Scene > New > Linked Copy duplicates scene.seam.links, so two records with the same link id drive the same shared target. Editing the source while scene B is shown rebuilds the target and updates only B's target_signature. When scene A next validates (switching back, undo, load, or any source edit), A's record sees a target mesh that differs from its stored signature and reports CONFLICT, even though nobody edited the result.",
+  "evidence": "5.2.2 and 4.0.2: flush(B) gives link ok. Revalidate and flush(A) gives link 'conflict', with A: CONFLICT 'Result edited downstream (mesh was edited): Overwrite, Bake or Branch'.",
+  "repro": "artifacts/review/data-integrity/test_link_linkcopy.py",
+  "suggested_fix": "Store target_signature on the target mesh (an ID property on obj.data) instead of on the per-scene link record. Alternatively, have the lifecycle hook detect the same link id / target in another scene's links and drop or re-id the duplicated records when a linked copy is created."
+ },
+ {
+  "title": "Re-enabling the add-on does not revalidate links: results stay stale while marked LIVE",
+  "severity": "minor",
+  "files": [
+   "/home/user/seam-wt/extensions/seam_studio/__init__.py",
+   "/home/user/seam-wt/review/extensions/seam_studio/engine/core.py"
+  ],
+  "scenario": "Open a file with links while SEAM is disabled (or disable it), edit a source, then enable the add-on. register() installs the handlers but never calls request_revalidate(), and load_post does not fire. The result keeps the old geometry with state LIVE and no stale flag until the source is touched again. Saving in this state (save_pre only flushes dirty keys) writes the stale result. The paint module's mark_pixels_applied() also does not run, which feeds the undo issue above.",
+  "evidence": "5.2.2: after the source was moved +200 px while disabled and the add-on re-enabled, flush() gives no link builds, the target extent stays (2.0,0.2,2.0), and the state is LIVE. Only after another source edit does it rebuild, to an extent of 4.01.",
+  "repro": "artifacts/review/data-integrity/test_addon_toggle.py (prints the stale state)",
+  "suggested_fix": "At the end of seam_studio.register(), call `engine.request_revalidate()` and run the load-time seeding (rasterdoc.mark_pixels_applied(), decal.seed_after_load for each scene), for example by calling the load_post handlers once via a deferred timer."
+ },
+ {
+  "title": "Undoing a SEAM pixel op (Fill/Clear/\u2026) also erases the native brush strokes painted before it on the same layer",
+  "severity": "major",
+  "files": [
+   "extensions/seam_studio/paint/rasterdoc.py",
+   "extensions/seam_studio/paint/ops.py"
+  ],
+  "scenario": "Paint workspace, Texture Paint mode on a SEAM canvas: paint a brush stroke on Layer 1, make a rectangle selection that does not touch the stroke, then Fill. Press Ctrl+Z until the Fill is undone. The brush stroke disappears together with the fill, even though the stroke's own undo step is still in the history. If you redo the Image Paint step, the stroke comes back.",
+  "evidence": "Blender 4.0.2 GUI under Xvfb, real Ctrl+Z, undo log from --log bke.undosys. Undo stack: Paint on Canvas, Image Paint (stroke), MemFile Internal (pre), Rectangular Selection, SEAM pixel edit, Fill. After Fill: reds=250, blues=1536, rev=1. Ctrl+Z #2 lands on the 'Rectangular Selection' step, which should be stroke + selection and no fill. Actual: reds=0, blues=0, has_sel=True, rev=0. Expected: reds=250, blues=0. Ctrl+Shift+Z onto 'Image Paint' restores reds=250. Cause: restore_pixels_after_undo() finds _applied=1 != restored rev 0. No journal entry exists for rev 0, so it writes _default_pixels (transparent) over the image. Even with a journal entry, it would write pixels from before the stroke. commit_pixels() never journals the pre-write pixels, so strokes made after the last SEAM write are lost.",
+  "repro": "/home/user/seam-wt/review/artifacts/review/undo/gui/run_gui_log.sh /home/user/seam-wt/review/artifacts/review/undo/gui/probe_stroke_fill2.py /home/user/seam-wt/review/artifacts/review/undo/gui/probe_stroke_fill2.log  (see the '[probe] ctrl+z #2' line)",
+  "suggested_fix": "Before every SEAM write (write_layer_array_srgb8 / write_mask_array / selection write), check whether the image holds native edits made since the current revision was journaled (image dirty and its bytes/CRC differ from journal[(id,kind,rev)], or there is no entry). If so, re-journal the current pixels under the current revision, e.g. _journal_put((holder.id, kind, rev), read_image_srgb8(img)), before commit_pixels bumps the revision. Undoing the SEAM op then restores the pixels as they were just before it, strokes included."
+ },
+ {
+  "title": "A parameter edit on a parametric shape followed by two Ctrl+Z turns the shape into a free path with stale geometry (post-undo rebuilds leak into earlier undo states)",
+  "severity": "major",
+  "files": [
+   "extensions/seam_studio/vector/shapes.py",
+   "extensions/seam_studio/engine/core.py",
+   "extensions/seam_studio/bridge.py"
+  ],
+  "scenario": "Add Rectangle (200 px), add another shape, change the rectangle's Width to 260 in the Sidebar. Blender pushes the 'Width' step when the value is committed; the engine timer regenerates the curve afterwards. Do any further action (Add Shape, Group, move an object), then press Ctrl+Z twice with a normal pause between presses. On the 'Width' step the engine regenerates the curve to 260 after the undo, without an undo push. The next memfile undo reuses that modified Curve, because its chunks are identical in both steps. The restored object then carries the old recipe and signature (200) next to a 260 curve. ShapeProducer.build treats the mismatch as a hand edit and calls expand(): kind becomes NONE and the parameters are released. Redo also leaves kind=NONE.",
+  "evidence": "GUI (Blender 4.0.2 under Xvfb, real Ctrl+Z, real engine timer): 'after next op: kind=RECT width=260 curve_width=260', 'ctrl+z #1: kind=RECT width=260 curve_width=260', 'ctrl+z #2: kind=NONE width=200 curve_width=260', 'ctrl+shift+z #1: kind=NONE width=260 curve_width=260'. Headless on bpy 5.2.2 and Blender 4.0.2 the flush result says 'shape edited by hand: parameters released (expanded)'. Without a flush between the two undos the state is correct (kind=RECT width=200 curve_width=200), which shows the post-undo rebuild is the cause. Expected after the 2nd undo: kind=RECT, width=200, curve 200 px. Calling curve.update_tag() after write_paths does not prevent it (tested).",
+  "repro": "GUI: /home/user/seam-wt/review/artifacts/review/undo/gui/run_gui_log.sh /home/user/seam-wt/review/artifacts/review/undo/gui/probe_shape_undo.py /home/user/seam-wt/review/artifacts/review/undo/gui/probe_shape_undo.log ; headless: cd /home/user/seam-wt/review && MID=1 /opt/seam-cache/venv-bpy52/bin/python artifacts/review/undo/t_shape_expand2.py (MID=0 = no flush between undos = correct)",
+  "suggested_fix": "Store the generated-curve signature on the Curve datablock (ob.data['_seam_sig_shape'] = recipe_sig + ':' + curve_sig) instead of on the Object, so the geometry and its signature are always restored or reused together. In build(), expand only when the curve differs from the signature recorded in the curve and that recorded recipe equals the current recipe. When the recipe differs, regenerate. Generally, D8 producers should keep a derived datablock's signature inside that same datablock, because Blender's memfile undo can reuse IDs modified after an undo."
+ },
+ {
+  "title": "Raster layer property edits made in Texture Paint mode (opacity, blend, visibility) cannot be undone, even by undoing past them",
+  "severity": "major",
+  "files": [
+   "extensions/seam_studio/paint/ui.py",
+   "extensions/seam_studio/paint/ops.py"
+  ],
+  "scenario": "In the Paint workspace (canvas in Texture Paint mode): stroke 1, set the active layer's Opacity to 0.3 in the layer list, stroke 2, then press Ctrl+Z repeatedly. The strokes are undone, but the opacity stays 0.3 at every step. It stays 0.3 even after undoing back to the step before paint mode was entered, where it was 1.0. The property edit becomes an Image-type undo step that does not capture the scene data. There is no newer memfile step, so the scene is never re-read. SEAM works around this only for its own operators (_object_mode_for_edit), not for the layer properties it exposes in paint mode.",
+  "evidence": "Blender 4.0.2 GUI, real Ctrl+Z. Push log: 'Opacity' type='Image'. Results: 'ctrl+z #1 (Opacity step): reds 250 opacity 0.3', '#2: reds 250 opacity 0.3', '#3 (Paint on Canvas): reds 0 opacity 0.3', '#4 (created2, Global Undo, opacity was 1.0 there): reds 0 opacity 0.3 mode TEXTURE_PAINT'. Expected: opacity back to 1.0 once the 'Opacity' step is undone.",
+  "repro": "/home/user/seam-wt/review/artifacts/review/undo/gui/run_gui_log.sh /home/user/seam-wt/review/artifacts/review/undo/gui/probe_opacity.py /home/user/seam-wt/review/artifacts/review/undo/gui/probe_opacity.log",
+  "suggested_fix": "In paint mode, change layer opacity, blend, visible and locked through an operator wrapped with @_undoable_in_paint_mode, e.g. seam.raster_layer_set(index, prop, value), drawn as the widget or driven from an update callback via a one-shot timer. That records a memfile step. Otherwise disable these widgets in Texture Paint mode with an explanation (poll_message_set or a label)."
+ },
+ {
+  "title": "Every SEAM pixel/layer operator run in Texture Paint mode creates two undo steps; the first Ctrl+Z does nothing",
+  "severity": "minor",
+  "files": [
+   "extensions/seam_studio/paint/ops.py",
+   "extensions/seam_studio/paint/io.py"
+  ],
+  "scenario": "With the canvas in Texture Paint mode, run Fill, Clear, Add/Remove/Duplicate/Move/Merge Layer, mask ops or Import PNG (all decorated with @_undoable_in_paint_mode). The wrapper pushes 'SEAM pixel edit' (memfile) in Object mode and re-enters Texture Paint. The operator's own REGISTER|UNDO push then adds a second, empty Image-type step named after the operator. The user's first Ctrl+Z appears to do nothing.",
+  "evidence": "GUI undo log after one Fill: 'SEAM pixel edit' type='Global Undo', then 'Fill' type='Image'. 'ctrl+z #1' loads 'SEAM pixel edit' and the state is unchanged (reds 250, blues 1536, rev 1). Redo shows the same empty step at the end: 'ctrl+shift+z #5' loads 'Fill' with no change.",
+  "repro": "/home/user/seam-wt/review/artifacts/review/undo/gui/run_gui_log.sh /home/user/seam-wt/review/artifacts/review/undo/gui/probe_stroke_fill2.py /home/user/seam-wt/review/artifacts/review/undo/gui/probe_stroke_fill2.log (lines 'ctrl+z #1' and 'ctrl+shift+z #5')",
+  "suggested_fix": "Do not push inside the wrapper. Leave paint mode, run the edit, and re-enter Texture Paint from a one-shot bpy.app.timers callback. The operator's own UNDO push then happens in Object mode and is the single memfile step, named after the operator. Alternatively drop 'UNDO' from bl_options of the wrapped operators and push once with message=self.bl_label in both branches."
+ },
+ {
+  "title": "bpy 5.2.2: undoing a gradient stop/colour edit leaves the baked gradient image showing the undone colours",
+  "severity": "minor",
+  "files": [
+   "extensions/seam_studio/vector/style.py"
+  ],
+  "scenario": "Set a shape's fill to Linear with stops red\u2192blue, do any other action (the gradient is baked and its signature stored), change stop 0 to green, then press Ctrl+Z. Memfile undo restores the style (red), the stored '_seam_sig_gradient' and the image's 'seam_hash', but on 5.2.2 it does not restore the image's pixel buffer. GradientProducer reports signature == stored, so the gradient stays green in Material Preview, Rendered and the material. Decals solve the same problem with decal._applied, which is cleared on undo; gradients have no equivalent.",
+  "evidence": "bpy 5.2.2: 'after undo: stop0 (1.0, 0.0, 0.0, 1.0) img px0 [0. 1. 0. 1.] expected px0 [1. 0. 0. 1.] match False'; flush: 'gradient:\u2026 skipped'. Blender 4.0.2 re-reads the packed image, so it passes there ('match True').",
+  "repro": "cd /home/user/seam-wt/review && /opt/seam-cache/venv-bpy52/bin/python artifacts/review/undo/t_gradient.py",
+  "suggested_fix": "Track what the image pixels were baked for in memory: _gradient_applied[owner_id] = digest. Clear it in undo_post, redo_post and load_post, and treat a gradient as stored only when _gradient_applied matches its signature. Equivalently, in an undo/redo handler set img['seam_hash'] = '' on every 'SEAM Gradient *' image and drop the owner's _seam_sig_gradient so sync_gradient re-bakes."
+ },
+ {
+  "title": "bpy 5.2.2: after undoing a source fill-colour change, the live 3D result's Face/Side materials keep the undone colour",
+  "severity": "minor",
+  "files": [
+   "extensions/seam_studio/link/producer.py"
+  ],
+  "scenario": "Live Extrude link from a red shape. Change the source fill to green in the Sidebar (the step is pushed before the engine timer updates the result), do another action, then Ctrl+Z twice. The second undo restores the red fill and the link's source_signature. The 'Face'/'Side' materials were recoloured green by the post-undo rebuild and are reused by the memfile undo, so they stay green. The link reports LIVE and signature == stored, so update_materials() never runs again.",
+  "evidence": "bpy 5.2.2, after ctrl+z #2: 'mat Face diffuse (0.0, 1.0, 0.0, 1.0) want (0.8, 0.2, 0.1, 1.0)' and 'mat Side diffuse (0.0, 0.65, 0.0, 1.0) want (0.52, 0.13, 0.065, 1.0)', state=LIVE, no link rebuild. Blender 4.0.2 rebuilds the link there and is correct.",
+  "repro": "cd /home/user/seam-wt/review && MODE=fill /opt/seam-cache/venv-bpy52/bin/python artifacts/review/undo/t_link_lag2.py",
+  "suggested_fix": "Do not rely on the link signature for the material colour. During revalidation (or whenever build() is skipped because the signatures match), call update_materials(link). It is idempotent and cheap, since set_material_color writes only on difference. Alternatively record the applied colour in the material ID and compare it in stored_signature."
+ }
+]
