@@ -252,4 +252,20 @@ def test_undo_after_save_tracks_packed_revision(seam, blend_path):
     bpy.ops.wm.open_mainfile(filepath=blend_path)
     d = cur()
     assert d.layers[0].rev == 2 and np.array_equal(pixels(d.layers[0].image), b)
-    assert r._content_rev(d.layers[0].image, (d.layers[0].id, "img")) == 2
+    assert r._content_rev(d.layers[0].image, (d.layers[0].id, "img"), 2) == 2
+
+
+def test_native_edits_without_revision_survive_undo_redo(seam):
+    """Pixels changed by native strokes (no SEAM revision) must not be replaced by the revision-0 default."""
+    doc = new_doc(8, 6, "JN")
+    r = rd()
+    base_steps()
+    buf = np.zeros(8 * 6 * 4, np.float32)
+    buf[:] = 0.5
+    doc.layers[0].image.pixels.foreach_set(buf)  # what a native stroke does
+    r.add_layer(doc, "Other")
+    bpy.ops.ed.undo_push(message="add layer")
+    bpy.ops.ed.undo()
+    bpy.ops.ed.redo()
+    img = cur().layers[0].image
+    assert (pixels(img) == 128).all()

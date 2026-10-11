@@ -359,14 +359,15 @@ def _pixel_holders():
                     yield doc, ly, "mask"
 
 
-def _content_rev(img, key) -> Optional[int]:
+def _content_rev(img, key, rev: int) -> Optional[int]:
     """Revision of the pixels an image holds right now, or None when it holds nothing meaningful.
 
     Live (dirty) buffers are SEAM's own writes (``_applied``); a clean packed image holds what was packed
     (recorded in ``seam_packed_rev``, which undo restores together with the packed data); a clean unpacked image is
     a freshly re-created, blank datablock (memfile undo re-reads images whose datablock differs between steps)."""
     if img.is_dirty:
-        return _applied.get(key)
+        # a live buffer without a record was only ever edited natively (strokes): it belongs to the current revision
+        return _applied.get(key, rev)
     if img.packed_file is not None:
         v = img.get("seam_packed_rev")
         return None if v is None else int(v)
@@ -384,7 +385,7 @@ def restore_pixels_after_undo() -> int:
         rev = int(getattr(holder, _REV_ATTR[kind]))
         key = (holder.id, kind)
         img = _holder_image(holder, kind)
-        if _content_rev(img, key) == rev:
+        if _content_rev(img, key, rev) == rev:
             _applied[key] = rev
             continue
         w, h = doc_size(doc)
