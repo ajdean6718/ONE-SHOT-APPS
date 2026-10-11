@@ -336,9 +336,9 @@ class SEAM_OT_raster_layer_merge_down(_LayerOp, bpy.types.Operator):
             self.report({"WARNING"}, str(exc))
             return {"CANCELLED"}
         err = float(np.abs(rd.composite_array(_active(context)) - before).max(initial=0.0))
-        if err > 0.01:  # the composite model is not associative for partly transparent layers / non-normal blends
+        if err > 0.01:  # a non-Normal blend depends on the whole stack below the pair, so merging it can change the look
             self.report({"WARNING"}, f"Merged, but the look changed slightly (max difference {err:.2f}): "
-                                     "the lower layer is partly transparent or not in Normal mode")
+                                     "one of the merged layers uses a blend mode other than Normal")
         return {"FINISHED"}
 
 
