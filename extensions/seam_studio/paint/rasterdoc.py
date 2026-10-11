@@ -224,17 +224,35 @@ def doc_size(doc) -> Tuple[int, int]:
     return int(doc.width), int(doc.height)
 
 
+def layer_image(layer):
+    """The pixel image of ``layer``.  If the datablock was deleted behind SEAM's back (Outliner, orphan clean-up) it is
+    recreated blank and transparent, so the document stays usable instead of every pixel operator failing with a
+    traceback; the console says what happened (the lost pixels can only come back through Undo)."""
+    img = layer.image
+    if img is not None:
+        return img
+    _sc, doc = doc_of_layer(layer)
+    w, h = doc_size(doc)
+    img = _new_image(_layer_image_name(doc, layer.name), w, h, "sRGB")
+    layer.image = img
+    commit_pixels(layer, "img", np.zeros((h, w, 4), np.uint8))
+    touch_layer(layer)
+    print(f"SEAM: the image of layer '{layer.name}' was missing; recreated it blank")
+    return img
+
+
 def layer_array_srgb8(layer) -> np.ndarray:
-    return read_image_srgb8(layer.image)
+    return read_image_srgb8(layer_image(layer))
 
 
 def layer_array(layer) -> np.ndarray:
     """Linear float ``H x W x 4`` (row 0 = top, straight alpha) of a layer."""
-    return R.from_uint8_srgb(read_image_srgb8(layer.image)).astype(np.float32, copy=False)
+    return R.from_uint8_srgb(read_image_srgb8(layer_image(layer))).astype(np.float32, copy=False)
 
 
 def write_layer_array_srgb8(layer, rgba8: np.ndarray, touch: bool = True) -> None:
     a8 = np.asarray(rgba8, np.uint8)
+    layer_image(layer)
     ensure_baseline(layer, "img")
     write_image_srgb8(layer.image, a8)
     commit_pixels(layer, "img", a8)
@@ -622,7 +640,7 @@ def duplicate_layer(doc, index: int):
     w, h = doc_size(doc)
     name = _unique_layer_name(doc, f"{src.name} copy")
     img = _new_image(_layer_image_name(doc, name), w, h, "sRGB")
-    write_image_srgb8(img, read_image_srgb8(src.image))
+    write_image_srgb8(img, read_image_srgb8(layer_image(src)))
     mask_img = None
     if src.mask is not None:
         mask_img = _new_image(_layer_image_name(doc, name, "mask"), w, h, "Non-Color", (1, 1, 1, 1))
@@ -1613,7 +1631,7 @@ def resize_canvas(doc, width: int, height: int, anchor: str = "TOP_LEFT", scale_
 
     jobs = []
     for ly in doc.layers:
-        jobs.append((ly.image, convert(ly.image, (0, 0, 0, 0))))
+        jobs.append((layer_image(ly), convert(layer_image(ly), (0, 0, 0, 0))))
         if ly.mask is not None:
             jobs.append((ly.mask, convert(ly.mask, (255, 255, 255, 255))))
     for ly in doc.layers:  # undo restores the old size from these snapshots

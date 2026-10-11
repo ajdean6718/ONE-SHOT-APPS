@@ -290,7 +290,7 @@ os._exit(0)
 '''
 
 
-def run_fresh_process(body, blend_path, tmp_path, timeout=300):
+def run_fresh_process(body, blend_path, tmp_path, timeout=300, crash=False):
     """Run ``body`` (Python source; ``BLEND`` is the file path, fill the dict ``RESULT``) in a new process of the
     same runtime - Blender binary or the ``bpy`` module - with the add-on enabled, and return RESULT."""
     import json
@@ -307,6 +307,9 @@ def run_fresh_process(body, blend_path, tmp_path, timeout=300):
     else:
         cmd = [sys.executable, script, str(blend_path), out]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=dict(os.environ))
+    if crash:                                   # the body ends the process abruptly (os._exit(9)): no result file
+        assert proc.returncode != 0 and not os.path.exists(out), (proc.returncode, proc.stdout[-2000:])
+        return {"returncode": proc.returncode}
     assert proc.returncode == 0 and os.path.exists(out), "child failed (%s)\n%s\n%s" % (
         proc.returncode, proc.stdout[-3000:], proc.stderr[-3000:])
     with open(out) as fh:
