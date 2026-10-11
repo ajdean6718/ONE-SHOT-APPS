@@ -21,7 +21,10 @@ Source -> image
       background). Rebuilds rewrite the pixels of the *same* datablock (``Image.scale`` when the size changes). The longer side is
       capped at ``MAX_RENDER_SIDE`` (4096 px; the renderer works on a float64 canvas) and the link message says so.
     * RASTER: the raster document composite (``doc.composite``, kept current by the paint producer) is shared
-      directly, so pixel edits show without any rebuild; ``decal_resolution`` is ignored.
+      directly, so pixel edits show without any rebuild; ``decal_resolution`` is ignored. Bake (detach) and
+      Remove Link give the kept result a frozen, packed copy (:func:`bake_image`), so it stops following the
+      document and survives a resize or delete of it; :func:`freeze_raster_users` does the same for links that
+      still share a composite the paint module is about to remove.
 
 Staleness and undo
     Memfile undo restores properties but not pixels written from Python. The pixels of a vector decal are
