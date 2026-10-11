@@ -634,3 +634,70 @@ def test_undo_of_a_gradient_stop_edit_restores_the_gradient_pixels(doc):
     core.request_revalidate()
     res = flush()
     assert all(r.status != "ok" for r in res if r.key.startswith("gradient"))
+
+
+def _showcase(n):
+    from test_link_support import make_shape
+    obs = []
+    for i in range(n):
+        ob = make_shape("S%d" % i, location=(float(i % 10) * 250.0, -float(i // 10) * 250.0))
+        st = ob.seam.style
+        if i % 2 == 0:
+            st.stroke_enabled = True
+            st.stroke_width = 4.0
+        if i % 5 == 0:
+            st.fill_type = "LINEAR"
+        obs.append(ob)
+    flush()
+    return obs
+
+
+def test_one_node_edit_touches_only_its_own_objects(doc):
+    """perf (5.2.2): a gradient re-bake used to re-assign the image node, which tags every object of the scene, so the
+    next pass examined every key (O(document) per edit). The edit must stay local whatever the document size."""
+    obs = _showcase(60)
+    tgt = obs[20]                               # stroked + gradient
+    passes = []
+
+    def handler(scene, dg):
+        passes.append(sum(1 for u in dg.updates if isinstance(u.id, bpy.types.Object)))
+
+    bpy.app.handlers.depsgraph_update_post.append(handler)
+    try:
+        bp = tgt.data.splines[0].bezier_points[1]
+        for attr in ("co", "handle_left", "handle_right"):
+            getattr(bp, attr).x += 3.0
+        tgt.data.update_tag()
+        res = flush()
+    finally:
+        bpy.app.handlers.depsgraph_update_post.remove(handler)
+    assert {r.key.split(":")[0] for r in res if r.status == "ok"} >= {"gradient", "stroke"}
+    assert max(passes) <= 4, passes
+    assert len(res) <= 12, [(r.key, r.status) for r in res]
+
+
+def test_pass_index_lookups_match_direct_scans(doc):
+    from seam_studio.engine import core
+    from seam_studio.vector import clip, style
+    obs = _showcase(12)
+    scene = bpy.context.scene
+    clip.apply_clip(scene, obs[1], [obs[2], obs[3]])
+    flush()
+    direct = {o.seam.id: (sorted(s.name for s in style.strokes_of(scene, o.seam.id)),
+                          sorted(c.name for c in o.children),
+                          sorted(c.name for c in style.users_collection(o, scene))) for o in obs}
+    masked = sorted(o.name for o in clip.clipped_by(scene, obs[1]))
+    core._indexing += 1                         # what the engine does around its key mapping / build loops
+    try:
+        assert style.scene_index(scene) is not None
+        for o in obs:
+            got = (sorted(s.name for s in style.strokes_of(scene, o.seam.id)),
+                   sorted(c.name for c in style.children_of(o, scene)),
+                   sorted(c.name for c in style.users_collection(o, scene)))
+            assert got == direct[o.seam.id], o.name
+            assert style.find_styled(scene, o.seam.id) == o
+        assert sorted(o.name for o in clip.clipped_by(scene, obs[1])) == masked == sorted([obs[2].name, obs[3].name])
+        assert clip.clip_child(obs[2]) is not None and clip.clip_child(obs[2]).seam.role == "CLIP_RESULT"
+    finally:
+        core._indexing -= 1
+    assert style.scene_index(scene) is None

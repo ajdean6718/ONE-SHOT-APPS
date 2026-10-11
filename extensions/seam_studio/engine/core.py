@@ -76,6 +76,8 @@ _executor: Optional[ThreadPoolExecutor] = None
 _stats = {"flushes": 0, "builds": 0, "skipped": 0, "errors": 0, "last_flush_ms": 0.0,
           "max_build_ms": 0.0, "last_build_ms": 0.0, "by_kind": {}, "stale_dropped": 0}
 _last_slow_ms = 0.0
+_generation = 0   # bumped whenever scene data may have changed outside the engine's control
+_indexing = 0     # > 0 while the engine maps updates to keys or runs a build loop
 
 MAX_PASSES = 4
 
@@ -129,6 +131,21 @@ def is_building() -> bool:
     return _building
 
 
+def index_generation() -> Optional[int]:
+    """A token for per-pass lookup caches (owner -> derived objects, parent -> children, ...).
+
+    Not None only while the engine maps a depsgraph update to keys or runs a build pass; it changes whenever
+    data may have changed behind the engine's back (each depsgraph update, each flush pass), so a cache built
+    under one token is valid for that whole handler call / pass. Producers that create or delete objects
+    during a pass must update their own cache entries. Outside the engine it is None: compute directly."""
+    return _generation if _indexing else None
+
+
+def _bump_generation() -> None:
+    global _generation
+    _generation += 1
+
+
 @contextmanager
 def suspend():
     """Ignore depsgraph updates while active (bulk edits that are rebuilt explicitly)."""
@@ -154,6 +171,8 @@ def _live_enabled(scene) -> bool:
 
 @persistent
 def _on_depsgraph_update(scene, depsgraph):
+    global _indexing
+    _bump_generation()
     if _building or _suspend:
         return
     for hook in list(_update_hooks):
@@ -163,32 +182,39 @@ def _on_depsgraph_update(scene, depsgraph):
             traceback.print_exc()
     if not _producers:
         return
+    _bump_generation()  # hooks may have changed ids / parents
     added = False
-    for upd in depsgraph.updates:
-        idd = upd.id
-        orig = getattr(idd, "original", idd)
-        geom = bool(upd.is_updated_geometry)
-        xform = bool(upd.is_updated_transform)
-        for p in _producers.values():
-            try:
-                for key in p.keys_for_update(scene, orig, geom, xform):
-                    _dirty[key] = None
-                    added = True
-            except ReferenceError:
-                continue
-            except Exception:
-                traceback.print_exc()
+    _indexing += 1
+    try:
+        for upd in depsgraph.updates:
+            idd = upd.id
+            orig = getattr(idd, "original", idd)
+            geom = bool(upd.is_updated_geometry)
+            xform = bool(upd.is_updated_transform)
+            for p in _producers.values():
+                try:
+                    for key in p.keys_for_update(scene, orig, geom, xform):
+                        _dirty[key] = None
+                        added = True
+                except ReferenceError:
+                    continue
+                except Exception:
+                    traceback.print_exc()
+    finally:
+        _indexing -= 1
     if added:
         _schedule()
 
 
 @persistent
 def _on_undo_redo(scene, *_args):
+    _bump_generation()
     request_revalidate()
 
 
 @persistent
 def _on_load_post(*_args):
+    _bump_generation()
     _dirty.clear()
     _pending.clear()
     request_revalidate()
@@ -367,7 +393,7 @@ def flush(scene=None, evaluate: Optional[bool] = None, wait_async: Optional[bool
     between passes so depsgraph handlers fire for pending data changes. ``wait_async``
     (default: True in background) computes async producers synchronously.
     """
-    global _revalidate, _building
+    global _revalidate, _building, _indexing
     scene = scene or bpy.context.scene
     background = bpy.app.background
     evaluate = background if evaluate is None else evaluate
@@ -382,25 +408,32 @@ def flush(scene=None, evaluate: Optional[bool] = None, wait_async: Optional[bool
                 bpy.context.view_layer.update()
             except Exception:
                 pass
+        _bump_generation()
         _collect_pending(scene, results)
         if _revalidate:
             _revalidate = False
-            for p in list(_producers.values()):
-                try:
-                    for key in p.all_keys(scene):
-                        _dirty[key] = None
-                except Exception:
-                    traceback.print_exc()
+            _indexing += 1
+            try:
+                for p in list(_producers.values()):
+                    try:
+                        for key in p.all_keys(scene):
+                            _dirty[key] = None
+                    except Exception:
+                        traceback.print_exc()
+            finally:
+                _indexing -= 1
         if not _dirty:
             break
         keys = _sorted_keys(_dirty)
         _dirty.clear()
         _building = True
+        _indexing += 1
         try:
             for key in keys:
                 _build_one(scene, key, results, sync_async=wait_async)
         finally:
             _building = False
+            _indexing -= 1
         if not evaluate:
             break  # GUI: the next depsgraph update reschedules follow-up passes
     _stats["flushes"] += 1
