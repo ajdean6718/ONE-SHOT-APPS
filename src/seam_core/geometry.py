@@ -639,7 +639,6 @@ def _exact_pairs(sa, sb, p0, p1, minx, maxx, miny, maxy, ring_id, local, ring_n,
 
 
 def _ring_edges(a: np.ndarray, closed: bool):
-    n = len(a)
     if closed:
         return a, np.roll(a, -1, axis=0)
     return a[:-1], a[1:]

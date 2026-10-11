@@ -4,6 +4,7 @@ import json
 import math
 import os
 import platform
+import sys
 import time
 
 import pytest
@@ -40,8 +41,16 @@ def record_perf(name, ms):
             doc = json.load(fh)
     except Exception:
         doc = {}
-    doc["machine"] = {"vcpus": os.cpu_count(), "platform": platform.platform()}
+    cpu = ""
+    try:
+        with open("/proc/cpuinfo") as fh:
+            cpu = next((ln.split(":", 1)[1].strip() for ln in fh if ln.startswith("model name")), "")
+    except OSError:
+        pass
+    doc["machine"] = {"vcpus": os.cpu_count(), "cpu": cpu, "platform": platform.platform()}
     label = "python-%s" % platform.python_version()
+    if "bpy" in sys.modules:
+        label += " (in Blender %s)" % sys.modules["bpy"].app.version_string
     doc.setdefault("runs", {}).setdefault(label, {})[name] = round(ms, 3)
     with open(out, "w") as fh:
         json.dump(doc, fh, indent=2, sort_keys=True)
@@ -238,3 +247,52 @@ def test_two_500_point_rings_under_300ms():
         t0 = time.perf_counter()
         b.boolean(a, c, op)
         assert (time.perf_counter() - t0) * 1000 < 300
+
+
+def _star(rnd, n, cx, cy, rmin, rmax):
+    pts = []
+    for i in range(n):
+        r = rnd.uniform(rmin, rmax)
+        pts.append((cx + r * math.cos(2 * math.pi * i / n), cy + r * math.sin(2 * math.pi * i / n)))
+    return pts
+
+
+def test_random_polygons_satisfy_set_identities():
+    import random
+    rnd = random.Random(5)
+    for trial in range(80):
+        pa = _star(rnd, rnd.randint(3, 25), 0, 0, 10, 40)
+        pb = _star(rnd, rnd.randint(3, 25), rnd.uniform(-30, 30), rnd.uniform(-30, 30), 10, 40)
+        aa = abs(g.signed_area(pa))
+        ab = abs(g.signed_area(pb))
+        union = area(b.boolean([pa], [pb], "UNION"))
+        inter = area(b.boolean([pa], [pb], "INTERSECT"))
+        diff = area(b.boolean([pa], [pb], "DIFFERENCE"))
+        excl = area(b.boolean([pa], [pb], "EXCLUDE"))
+        tol = 2e-6 * (aa + ab)  # float32 coordinates inside mathutils.Vector
+        assert union + inter == pytest.approx(aa + ab, abs=tol), trial
+        assert diff == pytest.approx(aa - inter, abs=tol), trial
+        assert excl == pytest.approx(union - inter, abs=tol), trial
+
+
+def test_grid_aligned_rectangles_match_cell_counting():
+    import random
+    rnd = random.Random(9)
+
+    def rect():
+        x, y, w, h = rnd.randint(0, 6), rnd.randint(0, 6), rnd.randint(1, 4), rnd.randint(1, 4)
+        return [(x, y), (x + w, y), (x + w, y + h), (x, y + h)], {(i, j) for i in range(x, x + w) for j in range(y, y + h)}
+
+    for trial in range(120):
+        sa = [rect() for _ in range(rnd.randint(1, 2))]
+        sb = [rect() for _ in range(rnd.randint(1, 2))]
+        ca = set()
+        for _, cells in sa:
+            ca ^= cells
+        cb = set()
+        for _, cells in sb:
+            cb ^= cells
+        expected = {"UNION": len(ca | cb), "INTERSECT": len(ca & cb), "DIFFERENCE": len(ca - cb), "EXCLUDE": len(ca ^ cb)}
+        for op, count in expected.items():
+            got = area(b.boolean([r for r, _ in sa], [r for r, _ in sb], op))
+            assert got == pytest.approx(count, abs=1e-9), (trial, op)

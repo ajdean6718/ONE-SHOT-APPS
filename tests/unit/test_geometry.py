@@ -5,6 +5,7 @@ import math
 import os
 import platform
 import random
+import sys
 import time
 
 import pytest
@@ -26,8 +27,16 @@ def record_perf(name, ms):
             doc = json.load(fh)
     except Exception:
         doc = {}
-    doc["machine"] = {"vcpus": os.cpu_count(), "platform": platform.platform()}
+    cpu = ""
+    try:
+        with open("/proc/cpuinfo") as fh:
+            cpu = next((ln.split(":", 1)[1].strip() for ln in fh if ln.startswith("model name")), "")
+    except OSError:
+        pass
+    doc["machine"] = {"vcpus": os.cpu_count(), "cpu": cpu, "platform": platform.platform()}
     label = "python-%s" % platform.python_version()
+    if "bpy" in sys.modules:
+        label += " (in Blender %s)" % sys.modules["bpy"].app.version_string
     run = doc.setdefault("runs", {}).setdefault(label, {})
     run[name] = round(ms, 3)
     with open(out, "w") as fh:

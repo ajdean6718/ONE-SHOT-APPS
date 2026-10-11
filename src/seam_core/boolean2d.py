@@ -8,6 +8,13 @@ Membership in A = parity (EVENODD) or winding (NONZERO) over A's rings; same for
 Select triangles by op, then extract boundary edges (edges whose two sides differ in
 selection) and chain them into rings; normalize (outer CCW, holes CW).
 Do NOT use output_type values above 2: their numbering differs between versions.
+
+Precision: ``mathutils.Vector`` stores single-precision floats, so input coordinates are rounded to
+float32 on the way into the CDT and the result is float32-exact (relative error about 1e-7;
+integers up to 2**24 and dyadic fractions such as 0.5 are exact). Callers should pass canvas-local
+coordinates, never world coordinates that include the large ``CANVAS_ORIGIN`` offset.
+Faces are handed to the CDT counter-clockwise (a clockwise face is treated as its complement),
+with the original orientation kept for NONZERO winding.
 """
 
 from __future__ import annotations
@@ -17,8 +24,7 @@ from typing import Callable, Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from .geometry import (Ring, _RingInfo, _ring_inside, _tolist, as_points, clean_ring,
-                       signed_area)
+from .geometry import Ring, _RingInfo, _ring_inside, as_points, clean_ring, signed_area
 
 OPS = ("UNION", "DIFFERENCE", "INTERSECT", "EXCLUDE")
 

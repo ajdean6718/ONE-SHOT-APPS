@@ -12,7 +12,7 @@ geometrically safe, so ordinary strokes produce non-overlapping triangles.
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from .geometry import Vec2, _check_scalars, as_points
 
@@ -142,8 +142,8 @@ class _Join:
         return chain
 
 
-def _semicircle(center: Vec2, start: Vec2, hw: float, rseg: int, end: Vec2) -> List[Vec2]:
-    """CCW half circle from ``start`` (a unit offset direction scaled later) to ``end``."""
+def _semicircle(center: Vec2, start: Vec2, hw: float, rseg: int) -> List[Vec2]:
+    """CCW half circle around ``center`` starting at ``center + hw * start`` (``start`` is a unit vector)."""
     steps = max(1, 2 * rseg)
     pts = [None] * (steps + 1)
     for k in range(steps + 1):
@@ -212,8 +212,8 @@ def stroke_outline(polyline: Sequence[Vec2], closed: bool, width: float, cap: st
             re = (p1[0] - hw * n1[0], p1[1] - hw * n1[1])
             rings.append([re, (re[0] + hw * d1[0], re[1] + hw * d1[1]), (le[0] + hw * d1[0], le[1] + hw * d1[1]), le])
         elif cap == "ROUND":
-            rings.append(ccw([p0] + _semicircle(p0, n0, hw, rseg, None)))
-            rings.append(ccw([p1] + _semicircle(p1, (-n1[0], -n1[1]), hw, rseg, None)))
+            rings.append(ccw([p0] + _semicircle(p0, n0, hw, rseg)))
+            rings.append(ccw([p1] + _semicircle(p1, (-n1[0], -n1[1]), hw, rseg)))
     return [r for r in rings if len(r) >= 3]
 
 
@@ -314,10 +314,10 @@ def stroke_mesh(polyline: Sequence[Vec2], closed: bool, width: float, cap: str =
             tri(re1, re_x, le_x)
             tri(re1, le_x, le1)
         elif cap == "ROUND":
-            arc0 = _semicircle(p0, n0, hw, rseg, None)
+            arc0 = _semicircle(p0, n0, hw, rseg)
             arc0[0], arc0[-1] = ls0, rs0
             fan(p0, arc0)
-            arc1 = _semicircle(p1, (-n1[0], -n1[1]), hw, rseg, None)
+            arc1 = _semicircle(p1, (-n1[0], -n1[1]), hw, rseg)
             arc1[0], arc1[-1] = re1, le1
             fan(p1, arc1)
     return verts, tris
