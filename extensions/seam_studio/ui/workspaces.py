@@ -456,7 +456,6 @@ def repair_steps(window, scene, log: dict):
             yield from _switch(window, bpy.data.workspaces[name])
             yield from _settle(2)
             log["configured"].update(configure_screen(name, window.screen, window, scene))
-            select_sidebar_tab(window.screen)
     except Exception as exc:  # report, then fall through to restore the user's workspace
         import traceback
         traceback.print_exc()
@@ -531,24 +530,13 @@ def activate(window, name: str) -> bool:
 
 # ------------------------------------------------------------------ sidebar tab
 
-def select_sidebar_tab(screen, category: str = "SEAM") -> int:
-    """Select a sidebar tab where the API allows it (5.x ``Region.active_panel_category``). Returns views changed.
+def sidebar_category(region) -> Optional[str]:
+    """Active sidebar tab name where Blender exposes it (5.x ``Region.active_panel_category``, read-only), else None.
 
-    Blender 4.0 has no RNA for this; ``scripts/build_template.py`` selects the tab once with a simulated
-    Ctrl+wheel and stores it in ``startup.blend``.
+    Neither 4.0 nor 5.2 lets scripts *set* the tab: ``scripts/build_template.py`` selects the SEAM tab by clicking it
+    (``--enable-event-simulate``) and stores the choice in ``startup.blend``; ``ui.panels.seam_tab_shown`` observes it.
     """
-    n = 0
-    for area in screen.areas:
-        if area.type != "VIEW_3D":
-            continue
-        for region in area.regions:
-            if region.type == "UI" and hasattr(region, "active_panel_category"):
-                try:
-                    region.active_panel_category = category
-                    n += 1
-                except Exception:
-                    pass
-    return n
+    return getattr(region, "active_panel_category", None)
 
 
 # ------------------------------------------------------------------ operators

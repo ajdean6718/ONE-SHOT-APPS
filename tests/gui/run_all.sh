@@ -5,6 +5,7 @@
 #   tests/gui/run_all.sh [scenario-name ...]      e.g. tests/gui/run_all.sh gui_launch
 #
 # Screenshots + result.json land in artifacts/gui/<scenario>/. SEAM_BLENDER overrides the Blender binary.
+# A scenario whose first line is "# gui-no-startup" runs against a template copy without startup.blend.
 set -uo pipefail
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
 cd "$ROOT"
@@ -32,7 +33,14 @@ for name in "${SCENARIOS[@]}"; do
   PROFILE="$(mktemp -d -t seam-gui-XXXXXX)"
   mkdir -p "$PROFILE/config" "$PROFILE/scripts/addons" "$PROFILE/scripts/startup/bl_app_templates_user"
   ln -s "$ROOT/extensions/seam_studio" "$PROFILE/scripts/addons/seam_studio"
-  ln -s "$ROOT/application_templates/seam" "$PROFILE/scripts/startup/bl_app_templates_user/seam"
+  if head -1 "$script" | grep -q '^# gui-no-startup'; then
+    # scenario for a template without startup.blend: use a copy of the template minus the generated file
+    mkdir -p "$PROFILE/scripts/startup/bl_app_templates_user/seam"
+    cp "$ROOT/application_templates/seam/__init__.py" "$ROOT/application_templates/seam/splash.png" \
+       "$PROFILE/scripts/startup/bl_app_templates_user/seam/"
+  else
+    ln -s "$ROOT/application_templates/seam" "$PROFILE/scripts/startup/bl_app_templates_user/seam"
+  fi
   OUT="$ROOT/artifacts/gui/$name"
   rm -rf "$OUT"; mkdir -p "$OUT"
   echo "== $name"

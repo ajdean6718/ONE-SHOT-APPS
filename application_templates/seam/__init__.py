@@ -105,12 +105,30 @@ def _subscribe_workspace_changes():
                              notify=_on_workspace_change)
 
 
+def _clear_factory_scene():
+    """Without ``startup.blend`` Blender loads its factory scene: drop the untouched default cube, camera and light
+    so a new SEAM document starts empty (anything the user changed or added is kept)."""
+    import os
+    if os.path.exists(os.path.join(os.path.dirname(os.path.abspath(__file__)), "startup.blend")):
+        return
+    defaults = {"Cube": "MESH", "Camera": "CAMERA", "Light": "LIGHT"}
+    objs = list(bpy.data.objects)
+    if {o.name for o in objs} != set(defaults) or any(o.type != defaults[o.name] for o in objs):
+        return
+    for ob in objs:
+        bpy.data.objects.remove(ob)
+    for col in list(bpy.data.collections):
+        if col.name == "Collection" and not col.objects and not col.children:
+            bpy.data.collections.remove(col)
+
+
 @persistent
 def _on_load_post(*_args):
     module_name = _state["module"]
     if not module_name or bpy.data.filepath:
         return  # existing files are never touched
     from importlib import import_module
+    _clear_factory_scene()
     try:
         document = import_module(module_name + ".ui.document")
         document.ensure_document(bpy.context.scene)

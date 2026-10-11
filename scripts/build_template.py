@@ -11,8 +11,8 @@ startup so the result is identical on every run (idempotent: running it again re
    layer, view transform Standard),
 3. creates the workspaces Vector, Paint, Model and Split by duplicating/reconfiguring Blender's native ones
    (``ui.workspaces.repair_steps``), orders them first and keeps all native workspaces behind them,
-4. selects the SEAM tab of the sidebar in every SEAM 3D view (Blender 4.0 has no API for it: a simulated
-   Ctrl+mouse-wheel over the sidebar cycles the tabs, 5.x sets ``Region.active_panel_category``),
+4. selects the SEAM tab of the sidebar in every SEAM 3D view (no Blender API sets it: simulated clicks on the
+   tab column, verified through ``ui.panels.seam_tab_shown``),
 5. activates Vector and writes the file compressed.
 
 Exit code 0 only when the file was written; the reason is printed otherwise.
@@ -46,11 +46,9 @@ def fail(msg, code=2):
 def ensure_seam_tab(window, ws_mod, panels, max_clicks=20):
     """Select the SEAM sidebar tab in every 3D view of the current workspace.
 
-    4.0 has no API for the active sidebar category (5.x has ``Region.active_panel_category``, set first). So click
-    down the tab column at the right edge of the sidebar until the SEAM Document panel is drawn there
+    Blender has no API to set the active sidebar category (5.x only exposes it read-only). So click down the tab column at the right edge of the sidebar until the SEAM Document panel is drawn there
     (``ui.panels.seam_tab_shown`` observes the draw). The selection is stored in the file."""
     import time
-    ws_mod.select_sidebar_tab(window.screen)
     for area in ws_mod.view3d_areas(window.screen):
         ui = next((r for r in area.regions if r.type == "UI"), None)
         if ui is None or ui.width < 10:
