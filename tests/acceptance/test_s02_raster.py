@@ -367,3 +367,83 @@ def test_first_mask_edit_after_reopen_is_undoable(seam, engine, tmp_path, blend_
     assert np.array_equal(composite(tmp_path, "undone.png"), ref)
     redo(2)
     assert (composite(tmp_path, "redone.png")[:, 48:] == 255).all()
+
+
+# ====================================================================== regressions from the raster review
+
+def native_disc(cx, cy, r, rgba=(1.0, 0.0, 0.0, 1.0)):
+    """Write a disc into the active layer image exactly the way a native brush stroke does (no SEAM revision)."""
+    img = doc().layers[doc().active_layer_index].image
+    buf = np.empty(W * H * 4, np.float32)
+    img.pixels.foreach_get(buf)
+    px = buf.reshape(H, W, 4)
+    yy, xx = np.mgrid[0:H, 0:W]
+    px[(xx + 0.5 - cx) ** 2 + (H - 1 - yy + 0.5 - cy) ** 2 <= r ** 2] = rgba      # row 0 = bottom in Blender images
+    img.pixels.foreach_set(buf)
+    img.update()
+
+
+def test_undo_of_an_operator_keeps_strokes_painted_after_the_previous_one(seam, engine, tmp_path):
+    """Regression: strokes never bump a revision, so Undo of the next Fill/Clear used to bring back the pixels of the
+    last SEAM write and erase every stroke made since."""
+    from seam_studio.paint import rasterdoc as rd
+    new_doc("WHITE")
+    fill_rect(0, 0, 32, H, BLUE)                                               # a SEAM write (rev 1)
+    rd.check_external_edits(doc())                                              # baseline (the paint timer does this)
+    native_disc(48, 24, 8)                                                      # a stroke on top of it
+    assert rd.check_external_edits(doc()) is True
+    flush()
+    before = composite(tmp_path, "before.png")
+    assert at(before, 48, 24) == (255, 0, 0, 255) and at(before, 5, 5) == (0, 0, 255, 255)
+    op(bpy.ops.seam.raster_select_none)
+    op(bpy.ops.seam.raster_clear)                                               # SEAM write #2 wipes the layer
+    flush()
+    assert at(composite(tmp_path, "cleared.png"), 48, 24) == (255, 255, 255, 255)
+    undo(1)
+    assert (composite(tmp_path, "undone.png") == before).all()                  # stroke and fill both back
+    redo(1)
+    assert at(composite(tmp_path, "redone.png"), 48, 24) == (255, 255, 255, 255)
+    assert rd.pixel_restore_warning() == ""
+
+
+def test_autosave_file_holds_the_layer_pixels(seam, engine, tmp_path, blend_path):
+    """Regression: Blender's auto save / Recover write the data without running save_pre, so unpacked layers came back
+    as opaque black generated images."""
+    new_doc("TRANSPARENT")
+    fill_rect(8, 8, 40, 32, RED)
+    op(bpy.ops.seam.raster_layer_add, name="Empty")                             # never painted
+    op(bpy.ops.seam.raster_mask_add, fill="WHITE")
+    flush()
+    ref = composite(tmp_path, "ref.png")
+    handlers = list(bpy.app.handlers.save_pre)
+    bpy.app.handlers.save_pre.clear()                                           # what auto save does: no save_pre
+    try:
+        assert bpy.ops.wm.save_as_mainfile(filepath=blend_path, copy=True) == {"FINISHED"}
+    finally:
+        bpy.app.handlers.save_pre.extend(handlers)
+    assert bpy.ops.wm.open_mainfile(filepath=blend_path) == {"FINISHED"}
+    flush()
+    assert (composite(tmp_path, "recovered.png") == ref).all()
+    assert at(composite(tmp_path, "recovered2.png"), 2, 2) == (0, 0, 0, 0)       # transparent, not black
+
+
+def test_copying_the_canvas_object_makes_an_independent_document(seam, engine, tmp_path):
+    from accsupport import select
+    d = new_doc("WHITE")
+    fill_rect(0, 0, 32, H, BLUE)
+    ref = composite(tmp_path, "ref.png")
+    select(d.canvas)
+    assert bpy.ops.object.duplicate("EXEC_DEFAULT", True, linked=False) == {"FINISHED"}
+    flush()
+    docs = list(bpy.context.scene.seam.rasters)
+    assert len(docs) == 2 and docs[0].id != docs[1].id
+    copy = bpy.context.active_object
+    assert copy.seam.raster_id == docs[1].id and docs[1].canvas == copy and docs[0].canvas != copy
+    bpy.context.scene.seam.active_raster_index = 1                              # paint on the copy
+    assert not docs[1].has_selection
+    op(bpy.ops.seam.raster_fill, color=GREEN)
+    flush()
+    assert at(composite(tmp_path, "copy.png"), 5, 5) == (0, 255, 0, 255)
+    bpy.context.scene.seam.active_raster_index = 0
+    select(docs[0].canvas)
+    assert (composite(tmp_path, "orig.png") == ref).all()                       # the original is untouched
