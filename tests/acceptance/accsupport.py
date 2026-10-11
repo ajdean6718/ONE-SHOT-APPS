@@ -24,9 +24,19 @@ def op(fn, **kw):
     """Run an operator like a button press (undo step pushed); it must finish."""
     res = fn("EXEC_DEFAULT", True, **kw)
     assert res == {"FINISHED"}, "%s -> %s" % (getattr(fn, "idname", lambda: fn)(), res)
-    if "UNDO" in getattr(getattr(bpy.types, fn.idname(), None), "bl_options", ()):
+    if _pushes_undo(fn):
         STEPS[0] += 1
     return res
+
+
+def _pushes_undo(fn):
+    """True when the operator pushes an undo step: SEAM operators declare it in ``bl_options``; the native operators
+    used by the scenarios (mode switch, transform, modifiers, delete, ...) all do - their flags are not introspectable."""
+    name = fn.idname()
+    cls = getattr(bpy.types, name, None)
+    if cls is not None:
+        return bool({"UNDO", "UNDO_GROUPED"} & set(getattr(cls, "bl_options", ())))
+    return not name.startswith(("RENDER_", "WM_", "ED_"))
 
 
 def push(message="edit"):
@@ -98,11 +108,12 @@ def add_shape(kind, x, y, width, height, color=None, **kw):
 
 
 def move_nodes(ob, indices, dx=0.0, dy=0.0, spline=0, stay_in_edit_mode=False):
-    """Select control points ``indices`` of ``ob`` in Edit Mode and translate them (handles follow) with G.
+    """Tab, select control points ``indices`` of ``ob``, G (handles follow), Tab - each step pushes undo like the UI.
 
     ``stay_in_edit_mode`` keeps the object in Edit Mode afterwards (the caller must leave it)."""
     select(ob)
-    bpy.ops.object.mode_set(mode="EDIT")
+    if ob.mode != "EDIT":
+        op(bpy.ops.object.mode_set, mode="EDIT")
     try:
         for si, sp in enumerate(ob.data.splines):
             for i, bp in enumerate(sp.bezier_points):
@@ -110,13 +121,12 @@ def move_nodes(ob, indices, dx=0.0, dy=0.0, spline=0, stay_in_edit_mode=False):
                 bp.select_control_point = on
                 bp.select_left_handle = on
                 bp.select_right_handle = on
-        res = bpy.ops.transform.translate("EXEC_DEFAULT", True, value=(dx, dy, 0.0))
-        assert res == {"FINISHED"}, res
+        op(bpy.ops.transform.translate, value=(dx, dy, 0.0))
     except BaseException:
         bpy.ops.object.mode_set(mode="OBJECT")
         raise
     if not stay_in_edit_mode:
-        bpy.ops.object.mode_set(mode="OBJECT")
+        op(bpy.ops.object.mode_set, mode="OBJECT")
     flush()
 
 
