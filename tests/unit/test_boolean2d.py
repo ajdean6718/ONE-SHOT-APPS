@@ -4,6 +4,7 @@ import json
 import math
 import os
 import platform
+import random
 import sys
 import time
 
@@ -296,3 +297,86 @@ def test_grid_aligned_rectangles_match_cell_counting():
         for op, count in expected.items():
             got = area(b.boolean([r for r, _ in sa], [r for r, _ in sb], op))
             assert got == pytest.approx(count, abs=1e-9), (trial, op)
+
+
+# ---------------------------------------------------------------- self-crossing input rings
+
+BOW = [(0, 0), (4, 4), (4, 0), (0, 4)]       # two lobes of area 4 each, crossing at (2, 2)
+BIG = [(-1, -1), (5, -1), (5, 5), (-1, 5)]   # contains both lobes
+
+
+@pytest.mark.parametrize("fill", ["EVENODD", "NONZERO"])
+@pytest.mark.parametrize("op,expected", [("UNION", 36), ("INTERSECT", 8), ("DIFFERENCE", 0), ("EXCLUDE", 28)])
+def test_bowtie_against_enclosing_square(op, expected, fill):
+    assert g.self_intersections(BOW)
+    assert area(b.boolean([BOW], [BIG], op, fill)) == pytest.approx(expected)
+    if op == "DIFFERENCE":
+        assert area(b.boolean([BIG], [BOW], op, fill)) == pytest.approx(28)
+
+
+def test_bowtie_against_disjoint_and_overlapping_shapes():
+    far = [(10, 0), (12, 0), (12, 2), (10, 2)]
+    assert area(b.boolean([BOW], [far], "UNION")) == pytest.approx(12)
+    assert area(b.boolean([BOW], [far], "DIFFERENCE")) == pytest.approx(8.0)  # bowtie untouched
+    # a square covering the left lobe's tip region only
+    left = [(0, 0), (2, 0), (2, 4), (0, 4)]
+    assert area(b.boolean([BOW], [left], "INTERSECT")) == pytest.approx(4.0)   # exactly the left lobe
+    assert area(b.boolean([BOW], [left], "UNION")) == pytest.approx(12.0)
+
+
+def test_figure_eight_and_pentagram_follow_the_fill_rule():
+    eight = [(0, 0), (2, 0), (3, 1), (2, 2), (0, 2), (-1, 1)]
+    star = [(math.cos(math.radians(90 + 144 * k)), math.sin(math.radians(90 + 144 * k))) for k in range(5)]
+    assert g.self_intersections(star)
+    full = area(b.boolean([star], [], "UNION", "NONZERO"))
+    eo = area(b.boolean([star], [], "UNION", "EVENODD"))
+    assert eo < full - 1e-6
+    # the inner pentagon is a hole under EVENODD and filled under NONZERO
+    res = b.boolean([star], [], "UNION", "EVENODD")
+    assert sum(len(h) for _o, h in res) == 0 and len(res) == 5     # five separate tips
+    assert len(b.boolean([star], [], "UNION", "NONZERO")) == 1
+    # a ring that passes through the same vertex twice (figure eight pinched at (2, 2))
+    pinch = [(0, 0), (2, 2), (4, 0), (4, 4), (2, 2), (0, 4)]
+    assert area(b.boolean([pinch], [BIG], "INTERSECT")) == pytest.approx(8.0)
+    assert area(b.boolean([eight], [], "UNION")) == pytest.approx(abs(g.signed_area(eight)))
+
+
+def _member(pt, rings, rule):
+    w = sum(g.winding_number(pt, r) for r in rings)
+    return (w % 2 != 0) if rule == "EVENODD" else (w != 0)
+
+
+def _in_result(pt, shapes):
+    return any(g.point_in_ring(pt, o) and not any(g.point_in_ring(pt, h) for h in hs) for o, hs in shapes)
+
+
+@pytest.mark.parametrize("coords", ["grid", "float"])
+def test_random_self_crossing_rings_match_winding_oracle(coords):
+    """Random (mostly self-crossing, on the integer grid also degenerate) rings vs a sampled winding-number oracle."""
+    rng = random.Random(7)
+    sels = {"UNION": lambda x, y: x or y, "INTERSECT": lambda x, y: x and y,
+            "DIFFERENCE": lambda x, y: x and not y, "EXCLUDE": lambda x, y: x != y}
+
+    def ring():
+        n = rng.randint(3, 8)
+        if coords == "grid":
+            return [(rng.randint(0, 12), rng.randint(0, 12)) for _ in range(n)]
+        return [(rng.uniform(0, 12), rng.uniform(0, 12)) for _ in range(n)]
+
+    crossing_cases = 0
+    for _case in range(70):
+        ra = [ring() for _ in range(rng.randint(1, 2))]
+        rb = [ring() for _ in range(rng.randint(1, 2))]
+        crossing_cases += any(g.self_intersections(r) for r in ra + rb)
+        samples = [(rng.uniform(-1, 13) + 7e-4, rng.uniform(-1, 13) + 3e-4) for _ in range(25)]
+        for rule in ("EVENODD", "NONZERO"):
+            for op, sel in sels.items():
+                res = b.boolean(ra, rb, op, rule)
+                for p in samples:
+                    assert sel(_member(p, ra, rule), _member(p, rb, rule)) == _in_result(p, res), (op, rule, ra, rb, p)
+    assert crossing_cases > 10
+
+
+def test_union_all_with_self_crossing_ring():
+    far = [(10, 0), (12, 0), (12, 2), (10, 2)]
+    assert area(b.union_all([[BOW], [far]])) == pytest.approx(12)

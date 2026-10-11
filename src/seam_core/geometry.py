@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -401,6 +401,18 @@ def _ring_inside(inner: _RingInfo, outer: _RingInfo) -> bool:
     return False
 
 
+def _ring_key(a: np.ndarray) -> tuple:
+    """Canonical key of a ring: the same cycle in either direction and from any start gives one key."""
+    pts = [(float(x), float(y)) for x, y in a.tolist()]
+    best = None
+    for seq in (pts, pts[::-1]):
+        k = min(range(len(seq)), key=lambda i: seq[i])
+        rot = tuple(seq[k:] + seq[:k])
+        if best is None or rot < best:
+            best = rot
+    return best
+
+
 def normalize_rings(rings: Sequence[Sequence[Vec2]], fill_rule: str = "EVENODD") -> List[Tuple[Ring, List[Ring]]]:
     """Group rings into shapes by nesting depth.
 
@@ -412,6 +424,8 @@ def normalize_rings(rings: Sequence[Sequence[Vec2]], fill_rule: str = "EVENODD")
     if fill_rule not in ("EVENODD", "NONZERO"):
         raise ValueError("fill_rule must be EVENODD or NONZERO, got %r" % (fill_rule,))
     infos: List[_RingInfo] = []
+    seen: Dict[tuple, int] = {}
+    mult: List[int] = []     # EVENODD: how many identical rings; NONZERO: signed sum of their orientations
     for r in rings:
         a = as_points(r, "ring")
         if len(a) >= 3 and a.shape[0] > 1 and tuple(a[0]) == tuple(a[-1]) and len(a) > 3:
@@ -421,7 +435,21 @@ def normalize_rings(rings: Sequence[Sequence[Vec2]], fill_rule: str = "EVENODD")
         info = _RingInfo(a)
         if abs(info.area) < 1e-12:
             continue
+        key = _ring_key(a)
+        k = seen.get(key)
+        if k is not None:
+            # exactly duplicated ring (same cycle, either direction): count it once with a weight
+            mult[k] += 1 if fill_rule == "EVENODD" else (1 if info.area > 0 else -1)
+            continue
+        seen[key] = len(infos)
+        mult.append(1 if fill_rule == "EVENODD" else (1 if info.area > 0 else -1))
         infos.append(info)
+    if fill_rule == "EVENODD":
+        keep = [k for k in range(len(infos)) if mult[k] % 2 == 1]
+    else:
+        keep = [k for k in range(len(infos)) if mult[k] != 0]
+    infos = [infos[k] for k in keep]
+    weight = [mult[k] for k in keep]
     n = len(infos)
     if n == 0:
         return []
@@ -445,10 +473,12 @@ def normalize_rings(rings: Sequence[Sequence[Vec2]], fill_rule: str = "EVENODD")
     role = [None] * n  # "outer" / "hole" / None (dropped)
     if fill_rule == "EVENODD":
         for i in range(n):
+            # surviving rings have odd multiplicity, so only their count matters for the parity
             role[i] = "outer" if len(containers[i]) % 2 == 0 else "hole"
         allowed_parents = {i for i in range(n) if role[i] == "outer"}
     else:
-        orient = [1 if info.area > 0 else -1 for info in infos]
+        # weight = signed orientation count of the (merged) identical rings
+        orient = weight
         for i in range(n):
             w_out = sum(orient[j] for j in containers[i])
             w_in = w_out + orient[i]
@@ -659,6 +689,151 @@ def self_intersections(ring: Sequence[Vec2], closed: bool = True, limit: int = 5
     local = np.arange(m, dtype=np.int64)
     hits = _crossings(p0, p1, ring_id, local, np.array([m]), np.array([closed]), limit)
     return [(i, j, (x, y)) for i, j, x, y in hits[:limit]]
+
+
+def _touch_hits_multi(rings: Sequence[np.ndarray], tol: float) -> List[Tuple[int, int, float, float, float]]:
+    """Vertices (of any ring) lying in the interior of an edge of any ring.
+
+    Returns ``(ring, edge, t, x, y)`` where edge i of a ring runs a[i] -> a[(i+1) % n] and ``t`` is the
+    position along it. A vertex is never reported against an edge it is an endpoint of, nor within
+    ``tol`` of that edge's endpoints.
+    """
+    allp = np.concatenate(list(rings))
+    n_all = len(allp)
+    starts = []
+    off = 0
+    for r in rings:
+        starts.append(off)
+        off += len(r)
+    ext = max(float(np.ptp(allp[:, 0])), float(np.ptp(allp[:, 1])), 1e-12)
+    cs = ext / max(1.0, math.sqrt(n_all))
+    ox = float(allp[:, 0].min())
+    oy = float(allp[:, 1].min())
+    xs = allp[:, 0].tolist()
+    ys = allp[:, 1].tolist()
+    grid: Dict[Tuple[int, int], List[int]] = {}
+    for k in range(n_all):
+        grid.setdefault((int((xs[k] - ox) / cs), int((ys[k] - oy) / cs)), []).append(k)
+    hits: List[Tuple[int, int, float, float, float]] = []
+    for ri, r in enumerate(rings):
+        n = len(r)
+        base = starts[ri]
+        for e in range(n):
+            g0 = base + e
+            g1 = base + (e + 1) % n
+            x0, y0, x1, y1 = xs[g0], ys[g0], xs[g1], ys[g1]
+            dx = x1 - x0
+            dy = y1 - y0
+            ll = dx * dx + dy * dy
+            if ll == 0.0:
+                continue
+            length = math.sqrt(ll)
+            cx0 = int((min(x0, x1) - tol - ox) / cs)
+            cx1 = int((max(x0, x1) + tol - ox) / cs)
+            cy0 = int((min(y0, y1) - tol - oy) / cs)
+            cy1 = int((max(y0, y1) + tol - oy) / cs)
+            for cx in range(cx0, cx1 + 1):
+                for cy in range(cy0, cy1 + 1):
+                    for k in grid.get((cx, cy), ()):
+                        if k == g0 or k == g1:
+                            continue
+                        px = xs[k]
+                        py = ys[k]
+                        t = ((px - x0) * dx + (py - y0) * dy) / ll
+                        if t * length <= tol or (1.0 - t) * length <= tol:
+                            continue
+                        if abs(dx * (py - y0) - dy * (px - x0)) / length <= tol:
+                            hits.append((ri, e, t, px, py))
+    return hits
+
+
+def _touch_hits(a: np.ndarray, tol: float) -> List[Tuple[int, float, float, float]]:
+    """Single-ring form of :func:`_touch_hits_multi`: ``(edge, t, x, y)``."""
+    return [(e, t, x, y) for _r, e, t, x, y in _touch_hits_multi([a], tol)]
+
+
+def split_self_intersections(ring: Sequence[Vec2]) -> List[Ring]:
+    """Split a closed ring into simple loops at its self-crossings and self-touches.
+
+    The ring is noded at every proper crossing and wherever one of its vertices lies on another of
+    its edges (which also covers collinear overlaps), then the vertex walk is cut wherever it
+    revisits a node. The loops carry the same signed winding as the input at every point (a bowtie
+    gives one CCW and one CW lobe; a pentagram gives its five tips plus the inner pentagon), so
+    EVENODD and NONZERO fills of the loops equal the fills of the original ring. A ring that is
+    already simple comes back unchanged as ``[ring]``. Degenerate loops (fewer than 3 points or
+    zero area, e.g. the two-gon left by a doubled-back edge) are dropped.
+    """
+    a = as_points(ring, "ring")
+    n = len(a)
+    if n < 3:
+        return []
+    ext = max(float(np.ptp(a[:, 0])), float(np.ptp(a[:, 1])), 1e-12)
+    q = ext * 1e-10
+    tol = ext * 1e-9
+    hits = self_intersections(a, True, 10 ** 9) if n >= 4 else []
+    touches = _touch_hits(a, tol) if n >= 4 else []
+    ids: Dict[Tuple[int, int], int] = {}
+    coords: List[Vec2] = []
+
+    def vid(x: float, y: float) -> int:
+        key = (int(round(x / q)), int(round(y / q)))
+        k = ids.get(key)
+        if k is None:
+            k = len(coords)
+            ids[key] = k
+            coords.append((x, y))
+        return k
+
+    base = [vid(float(a[e, 0]), float(a[e, 1])) for e in range(n)]
+    on_edge: Dict[int, List[Tuple[float, int]]] = {}
+    for i, j, (x, y) in hits:
+        v = vid(x, y)
+        for e in (i, j):
+            x0, y0 = a[e]
+            x1, y1 = a[(e + 1) % n]
+            dx = x1 - x0
+            dy = y1 - y0
+            t = ((x - x0) * dx + (y - y0) * dy) / (dx * dx + dy * dy)
+            on_edge.setdefault(e, []).append((t, v))
+    for e, t, x, y in touches:
+        on_edge.setdefault(e, []).append((t, vid(x, y)))
+    walk: List[int] = []
+    for e in range(n):
+        walk.append(base[e])
+        for _t, v in sorted(on_edge.get(e, ())):
+            walk.append(v)
+    # collapse consecutive repeats (a node snapped onto a neighbouring vertex)
+    cleaned = [walk[0]]
+    for v in walk[1:]:
+        if v != cleaned[-1]:
+            cleaned.append(v)
+    while len(cleaned) > 1 and cleaned[0] == cleaned[-1]:
+        cleaned.pop()
+    if len(set(cleaned)) == len(cleaned) == n:
+        return [_tolist(a)]           # already simple: nothing was inserted or repeated
+    stack: List[int] = []
+    pos: Dict[int, int] = {}
+    loops: List[List[int]] = []
+    for v in cleaned:
+        k = pos.get(v)
+        if k is None:
+            pos[v] = len(stack)
+            stack.append(v)
+        else:
+            loops.append(stack[k:])
+            for u in stack[k + 1:]:
+                del pos[u]
+            del stack[k + 1:]
+    loops.append(stack)
+    out: List[Ring] = []
+    for lp in loops:
+        if len(lp) < 3:
+            continue
+        pts = [coords[v] for v in lp]
+        if abs(signed_area(pts)) < 1e-12:
+            continue
+        out.append(pts)
+    return out
 
 
 def validate_rings(rings: Sequence[Sequence[Vec2]], require_closed_area: bool = True) -> List[Issue]:
@@ -1207,12 +1382,126 @@ def _repair_t_junctions(order_rings: List[List[int]], tris: List[Tuple[int, int,
     return [t for k, t in enumerate(tris) if k not in replaced] + extra
 
 
+def _edge_node_hits(xs: List[float], ys: List[float], edges: Sequence[Tuple[int, int]], tol: float,
+                    grid, ox: float, oy: float, cs: float) -> Dict[Tuple[int, int], List[Tuple[float, int]]]:
+    """For each (i, j) edge, vertices strictly inside it (within ``tol``): ``{edge: [(t, vertex), ...]}``."""
+    out: Dict[Tuple[int, int], List[Tuple[float, int]]] = {}
+    for (g0, g1) in edges:
+        x0, y0, x1, y1 = xs[g0], ys[g0], xs[g1], ys[g1]
+        dx = x1 - x0
+        dy = y1 - y0
+        ll = dx * dx + dy * dy
+        if ll == 0.0:
+            continue
+        length = math.sqrt(ll)
+        cx0 = int((min(x0, x1) - tol - ox) / cs)
+        cx1 = int((max(x0, x1) + tol - ox) / cs)
+        cy0 = int((min(y0, y1) - tol - oy) / cs)
+        cy1 = int((max(y0, y1) + tol - oy) / cs)
+        for cx in range(cx0, cx1 + 1):
+            for cy in range(cy0, cy1 + 1):
+                for k in grid.get((cx, cy), ()):
+                    if k == g0 or k == g1:
+                        continue
+                    px = xs[k]
+                    py = ys[k]
+                    t = ((px - x0) * dx + (py - y0) * dy) / ll
+                    if t * length <= tol or (1.0 - t) * length <= tol:
+                        continue
+                    if abs(dx * (py - y0) - dy * (px - x0)) / length <= tol:
+                        out.setdefault((g0, g1), []).append((t, k))
+    return out
+
+
+def _repair_diagonal_t_junctions(tris: List[Tuple[int, int, int]], pts: List[Vec2]) -> List[Tuple[int, int, int]]:
+    """Split triangles whose edge passes exactly through another vertex (earcut can emit these).
+
+    Without it two neighbouring triangles disagree about the vertices on their shared edge, which
+    leaves a crack in extruded caps. Each pass fans a triangle around the apex opposite the edge.
+    """
+    if not tris:
+        return tris
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    n = len(pts)
+    ext = max(max(xs) - min(xs), max(ys) - min(ys), 1e-12)
+    tol = ext * 1e-9
+    cs = ext / max(1.0, math.sqrt(n))
+    ox = min(xs)
+    oy = min(ys)
+    grid: Dict[Tuple[int, int], List[int]] = {}
+    for k in range(n):
+        grid.setdefault((int((xs[k] - ox) / cs), int((ys[k] - oy) / cs)), []).append(k)
+    done: List[Tuple[int, int, int]] = []
+    work = list(tris)
+    for _round in range(8):
+        edges = set()
+        for a, b, c in work:
+            for u, v in ((a, b), (b, c), (c, a)):
+                edges.add((u, v) if u < v else (v, u))
+        hits = _edge_node_hits(xs, ys, list(edges), tol, grid, ox, oy, cs)
+        if not hits:
+            done.extend(work)
+            return done
+        nxt: List[Tuple[int, int, int]] = []
+        for tri in work:
+            a, b, c = tri
+            pieces = None
+            for (u, v, apex) in ((a, b, c), (b, c, a), (c, a, b)):
+                key = (u, v) if u < v else (v, u)
+                nodes = hits.get(key)
+                if not nodes:
+                    continue
+                chain = [u]
+                for _t, k in sorted(nodes, reverse=(u > v)):
+                    if pts[k] != pts[chain[-1]]:   # coincident points would only add zero-area triangles
+                        chain.append(k)
+                if pts[v] != pts[chain[-1]]:
+                    chain.append(v)
+                if len(chain) >= 3:
+                    pieces = [(chain[q], chain[q + 1], apex) for q in range(len(chain) - 1)]
+                    break
+            if pieces is None:
+                done.append(tri)
+            else:
+                nxt.extend(pieces)
+        work = nxt
+    done.extend(work)
+    return done
+
+
+def _reject_crossings(rings: List[np.ndarray]) -> None:
+    """Raise ValueError when any ring crosses itself or another ring.
+
+    Earcut's fallback passes are super-linear on crossing input (seconds for a few thousand
+    vertices), so triangulate refuses it up front; the check itself is near-linear.
+    """
+    p0s = []
+    p1s = []
+    rid = []
+    loc = []
+    ring_n = np.zeros(len(rings), dtype=np.int64)
+    for i, a in enumerate(rings):
+        s0, e0 = _ring_edges(a, True)
+        p0s.append(s0)
+        p1s.append(e0)
+        rid.append(np.full(len(s0), i, dtype=np.int64))
+        loc.append(np.arange(len(s0), dtype=np.int64))
+        ring_n[i] = len(s0)
+    hits = _crossings(np.concatenate(p0s), np.concatenate(p1s), np.concatenate(rid), np.concatenate(loc),
+                      ring_n, np.ones(len(rings), dtype=bool), 1)
+    if hits:
+        raise ValueError("triangulate: rings cross each other or themselves (first crossing near (%g, %g)); "
+                         "validate_rings / split_self_intersections / boolean2d can repair this" % (hits[0][2], hits[0][3]))
+
+
 def triangulate(outer: Sequence[Vec2], holes: Sequence[Sequence[Vec2]] = ()) -> Tuple[List[Vec2], List[Tuple[int, int, int]]]:
     """Triangulate a polygon with holes (ear clipping with hole bridging, earcut-style).
 
     Returns (vertices, triangles); vertices are outer points followed by each hole's points
-    in input order; triangles are CCW index triples. Must handle collinear points,
-    duplicate points and touching holes without crashing.
+    in input order; triangles are CCW index triples. Handles collinear points,
+    duplicate points and touching holes. Rings that cross themselves or each other raise
+    ``ValueError`` (see :func:`validate_rings`).
     """
     o = as_points(outer, "outer")
     hs = [as_points(h, "hole %d" % k) for k, h in enumerate(holes)]
@@ -1228,6 +1517,7 @@ def triangulate(outer: Sequence[Vec2], holes: Sequence[Sequence[Vec2]] = ()) -> 
     for h, off in zip(hs, offsets):
         if len(h) >= 3:
             hole_items.append([(off + k, verts[off + k][0], verts[off + k][1]) for k in range(len(h))])
+    _reject_crossings([o] + [h for h in hs if len(h) >= 3])
     tris = _earcut(outer_items, hole_items)
     # material-on-the-left index order for each ring, used to re-insert dropped collinear points
     def _ordered(items, ccw):
@@ -1240,4 +1530,4 @@ def triangulate(outer: Sequence[Vec2], holes: Sequence[Sequence[Vec2]] = ()) -> 
         return idx if ccw == (area > 0) else idx[::-1]
     rings = [_ordered(outer_items, True)] + [_ordered(it, False) for it in hole_items]
     tris = _repair_t_junctions(rings, tris, verts)
-    return verts, tris
+    return verts, _repair_diagonal_t_junctions(tris, verts)

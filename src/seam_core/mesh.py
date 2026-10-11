@@ -16,7 +16,8 @@ from typing import List, Sequence, Tuple
 
 import numpy as np
 
-from .geometry import Ring, Vec2, as_points, signed_area, triangulate, _check_scalars
+from .geometry import (Ring, Vec2, _check_scalars, _touch_hits_multi, as_points, self_intersections, signed_area,
+                       triangulate)
 
 Vec3 = Tuple[float, float, float]
 
@@ -73,6 +74,9 @@ def _oriented_ring(ring: Sequence[Vec2], ccw: bool) -> List[Vec2]:
         return []
     a = signed_area(pts)
     if a == 0.0:
+        if len(pts) >= 4 and self_intersections(pts, True, 1):
+            # a balanced bowtie has zero net area; do not skip it silently
+            raise ValueError("extrude: ring crosses itself (use validate_rings / boolean2d to repair it)")
         return []
     if (a > 0.0) != ccw:
         pts.reverse()
@@ -91,6 +95,12 @@ def extrude(shapes: Sequence[Tuple[Ring, List[Ring]]], depth: float, cap_front: 
     front cap (a flat, open surface); negative or non-finite depth raises ``ValueError``.
     Shape rings are cleaned (duplicate points dropped) and re-oriented (outer CCW, holes CW)
     defensively; shapes whose outer ring is degenerate are skipped.
+
+    Touching rings (a hole vertex on the outer boundary or on another hole, e.g. from a boolean) are
+    noded and their coincident vertices merged, so the mesh stays watertight; the vertical wall edge
+    at such a pinch point is shared by four wall faces (inherently non-manifold geometry), every other
+    edge is used by exactly two faces. Rings that cross themselves or each other raise ``ValueError``
+    (from :func:`seam_core.geometry.triangulate`; use ``validate_rings`` or ``boolean2d`` to repair).
     """
     d = float(depth)
     _check_scalars(d)
@@ -127,30 +137,31 @@ def extrude(shapes: Sequence[Tuple[Ring, List[Ring]]], depth: float, cap_front: 
     uvs = mesh.uvs
     flat = d == 0.0
     for outer, holes in prepared:
-        rings = [outer] + holes
-        layer_n = sum(len(r) for r in rings)
+        rings, ring_idx, uniq = _node_shape([outer] + holes)
+        layer_n = len(uniq)
         base = len(verts)
         for z in ((z1,) if flat else (z0, z1)):
-            for r in rings:
-                verts.extend((x, y, z) for x, y in r)
+            verts.extend((x, y, z) for x, y in uniq)
         top = base if flat else base + layer_n
         bottom = base
         if cap_front or cap_back:
-            cv, ctris = triangulate(outer, holes)
+            cv, ctris = triangulate(rings[0], rings[1:])
+            cmap = [i for r in ring_idx for i in r]
+            # sliver triangles between coincident (touching) ring vertices collapse after merging
+            ctris = [t for t in ctris if len({cmap[t[0]], cmap[t[1]], cmap[t[2]]}) == 3]
             if cap_front:
                 for a, b, c in ctris:
-                    faces.append((top + a, top + b, top + c))
+                    faces.append((top + cmap[a], top + cmap[b], top + cmap[c]))
                     mats.append(MAT_FACE)
                     uvs.extend(cap_uv(*cv[i]) for i in (a, b, c))
             if cap_back and not flat:
                 for a, b, c in ctris:
-                    faces.append((bottom + c, bottom + b, bottom + a))
+                    faces.append((bottom + cmap[c], bottom + cmap[b], bottom + cmap[a]))
                     mats.append(MAT_FACE)
                     uvs.extend(cap_uv(*cv[i]) for i in (c, b, a))
         if flat:
             continue
-        offset = 0
-        for r in rings:
+        for r, idx in zip(rings, ring_idx):
             n = len(r)
             edge_len = [math.hypot(r[(k + 1) % n][0] - r[k][0], r[(k + 1) % n][1] - r[k][1]) for k in range(n)]
             total = sum(edge_len) or 1.0
@@ -160,13 +171,57 @@ def extrude(shapes: Sequence[Tuple[Ring, List[Ring]]], depth: float, cap_front: 
                 u0 = acc / total
                 acc += edge_len[k]
                 u1 = acc / total
-                a_b = bottom + offset + k
-                b_b = bottom + offset + k2
+                a_b = bottom + idx[k]
+                b_b = bottom + idx[k2]
                 faces.append((a_b, b_b, b_b + layer_n, a_b + layer_n))
                 mats.append(MAT_SIDE)
                 uvs.extend(((u0, 0.0), (u1, 0.0), (u1, 1.0), (u0, 1.0)))
-            offset += n
     return mesh
+
+
+def _node_shape(rings: List[List[Vec2]]):
+    """Make the rings of one shape conform where they touch.
+
+    Vertices lying on another ring edge are inserted into that edge (so cap triangles and walls
+    share it), then coincident vertices are merged. Returns ``(rings, ring_idx, unique_points)``
+    where ``ring_idx[r][k]`` is the index into ``unique_points`` of vertex k of ring r.
+    A touching shape is pinched: the vertical wall edge at a merged vertex is used by four wall
+    faces (two per ring), everything else stays 2-manifold.
+    """
+    arrs = [np.asarray(r, dtype=np.float64) for r in rings]
+    allp = np.concatenate(arrs)
+    ext = max(float(np.ptp(allp[:, 0])), float(np.ptp(allp[:, 1])), 1e-12)
+    hits = _touch_hits_multi(arrs, ext * 1e-9)
+    if hits:
+        extra = {}
+        for ri, e, t, x, y in hits:
+            extra.setdefault((ri, e), []).append((t, (x, y)))
+        new_rings = []
+        for ri, r in enumerate(rings):
+            nr = []
+            for e, pt in enumerate(r):
+                nr.append(pt)
+                for _t, q in sorted(extra.get((ri, e), ())):
+                    if q != nr[-1]:
+                        nr.append(q)
+            while len(nr) > 1 and nr[0] == nr[-1]:
+                nr.pop()
+            new_rings.append(nr)
+        rings = new_rings
+    seen = {}
+    uniq: List[Vec2] = []
+    ring_idx: List[List[int]] = []
+    for r in rings:
+        idx = []
+        for pt in r:
+            k = seen.get(pt)
+            if k is None:
+                k = len(uniq)
+                seen[pt] = k
+                uniq.append(pt)
+            idx.append(k)
+        ring_idx.append(idx)
+    return rings, ring_idx, uniq
 
 
 def _profile_uv_lengths(pts: Sequence[Vec2], closed: bool) -> List[float]:

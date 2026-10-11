@@ -13,6 +13,9 @@ Precision: ``mathutils.Vector`` stores single-precision floats, so input coordin
 float32 on the way into the CDT and the result is float32-exact (relative error about 1e-7;
 integers up to 2**24 and dyadic fractions such as 0.5 are exact). Callers should pass canvas-local
 coordinates, never world coordinates that include the large ``CANVAS_ORIGIN`` offset.
+Self-crossing input rings are split at their crossings into simple loops first (the CDT assigns
+face membership wrongly for self-crossing faces); the loops keep their orientation, so EVENODD and
+NONZERO results match the original ring.
 Faces are handed to the CDT counter-clockwise (a clockwise face is treated as its complement),
 with the original orientation kept for NONZERO winding.
 """
@@ -24,7 +27,7 @@ from typing import Callable, Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from .geometry import Ring, _RingInfo, _ring_inside, as_points, clean_ring, signed_area
+from .geometry import Ring, _RingInfo, _ring_inside, as_points, clean_ring, signed_area, split_self_intersections
 
 OPS = ("UNION", "DIFFERENCE", "INTERSECT", "EXCLUDE")
 
@@ -55,9 +58,17 @@ def _prepare_set(rings) -> List[np.ndarray]:
             a = a[:-1]
         if len(a) < 3:
             continue
-        if signed_area(a) == 0.0:
+        # A self-crossing ring (bowtie, figure eight) is not a valid CDT face: split it into simple
+        # loops at the crossings. Each loop keeps its own orientation, so winding and parity are preserved.
+        loops = split_self_intersections(a) if len(a) >= 4 else [a]
+        if len(loops) == 1 and np.array_equal(np.asarray(loops[0]), a):
+            if signed_area(a) != 0.0:
+                out.append(a)  # no crossings: keep the cleaned array as is
             continue
-        out.append(a)
+        for lp in loops:
+            arr = np.asarray(lp, dtype=np.float64)
+            if len(arr) >= 3 and signed_area(arr) != 0.0:
+                out.append(arr)
     return out
 
 

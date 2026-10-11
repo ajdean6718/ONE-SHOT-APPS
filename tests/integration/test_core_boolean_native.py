@@ -130,3 +130,24 @@ def test_two_500_point_rings_under_300ms(api):
     lens = 2 * r * r * math.acos(d / (2 * r)) - (d / 2) * math.sqrt(4 * r * r - d * d)
     inter = boolean2d.boolean(a, c, "INTERSECT")
     assert area(geometry, inter) == pytest.approx(lens, rel=3e-3)
+
+
+BOW = [(0, 0), (4, 4), (4, 0), (0, 4)]       # self-crossing: two lobes of area 4 each
+BIG = [(-1, -1), (5, -1), (5, 5), (-1, 5)]
+
+
+@pytest.mark.parametrize("fill", ["EVENODD", "NONZERO"])
+@pytest.mark.parametrize("op,expected", [("UNION", 36.0), ("INTERSECT", 8.0), ("DIFFERENCE", 0.0), ("EXCLUDE", 28.0)])
+def test_bowtie_input_is_split_not_silently_wrong(api, op, expected, fill):
+    boolean2d, geometry = api
+    assert geometry.self_intersections(BOW)
+    res = boolean2d.boolean([BOW], [BIG], op, fill)
+    assert area(geometry, res) == pytest.approx(expected, abs=1e-9)
+
+
+def test_bowtie_union_with_disjoint_square_and_union_all(api):
+    boolean2d, geometry = api
+    far = sq(10, 0, 2)
+    assert area(geometry, boolean2d.boolean([BOW], [far], "UNION")) == pytest.approx(12.0, abs=1e-9)
+    assert area(geometry, boolean2d.boolean([BOW], [far], "DIFFERENCE")) == pytest.approx(8.0, abs=1e-9)
+    assert area(geometry, boolean2d.union_all([[BOW], [far]])) == pytest.approx(12.0, abs=1e-9)

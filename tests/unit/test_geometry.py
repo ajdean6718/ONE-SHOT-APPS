@@ -495,3 +495,101 @@ def test_malformed_points_raise_value_error():
         g.signed_area([(0, 0, 0), (1, 1, 1), (2, 2, 2)])
     with pytest.raises(ValueError):
         g.triangulate([("a", "b"), (1, 2), (3, 4)])
+
+
+# ---------------------------------------------------------------- review fixes: crossing rings, duplicates, T-junctions
+
+def test_split_self_intersections_bowtie_pentagram_and_simple():
+    bow = [(0, 0), (4, 4), (4, 0), (0, 4)]
+    loops = g.split_self_intersections(bow)
+    assert len(loops) == 2
+    assert sorted(round(g.signed_area(l), 9) for l in loops) == [-4.0, 4.0]
+    assert all(not g.self_intersections(l) for l in loops)
+    star = [(math.cos(math.radians(90 + 144 * k)), math.sin(math.radians(90 + 144 * k))) for k in range(5)]
+    parts = g.split_self_intersections(star)
+    assert len(parts) >= 2 and all(not g.self_intersections(p) for p in parts)
+    sq = [(0, 0), (2, 0), (2, 2), (0, 2)]
+    assert g.split_self_intersections(sq) == [list(map(tuple, sq))]
+    # winding is preserved: the pentagram centre has winding 2 either way
+    assert sum(g.winding_number((0.0, 0.05), p) for p in parts) == g.winding_number((0.0, 0.05), star) == 2
+    assert g.split_self_intersections([(0, 0), (1, 1)]) == []
+
+
+def test_split_self_intersections_collinear_overlap_and_touch():
+    # doubled-back edge: the overlapping stretch cancels
+    ring = [(0, 0), (4, 0), (4, 4), (4, 2), (0, 2)]
+    loops = g.split_self_intersections(ring)
+    assert sum(g.signed_area(l) for l in loops) == pytest.approx(g.signed_area(ring))
+    # a vertex resting on another edge of the same ring
+    touch = [(0, 0), (4, 0), (4, 4), (2, 0), (0, 4)]
+    parts = g.split_self_intersections(touch)
+    assert sum(g.signed_area(p) for p in parts) == pytest.approx(g.signed_area(touch))
+    assert len(parts) == 2
+
+
+def test_triangulate_rejects_crossing_rings_quickly():
+    bow = [(0, 0), (4, 4), (4, 0), (0, 4)]
+    with pytest.raises(ValueError):
+        g.triangulate(bow)
+    with pytest.raises(ValueError):          # a hole poking through the outer boundary
+        g.triangulate([(0, 0), (10, 0), (10, 10), (0, 10)], [[(8, 5), (12, 5), (12, 6), (8, 6)][::-1]])
+    rnd = random.Random(3)
+    n = 5000
+    ring = [(math.cos(2 * math.pi * i / n) * (100 + rnd.uniform(-30, 30)),
+             math.sin(2 * math.pi * i / n) * (100 + rnd.uniform(-30, 30))) for i in range(n)]
+    assert g.self_intersections(ring)
+    t0 = time.perf_counter()
+    with pytest.raises(ValueError):
+        g.triangulate(ring)
+    ms = (time.perf_counter() - t0) * 1000
+    record_perf("triangulate_reject_5k_crossing_ring_ms", ms)
+    assert ms < 3000   # was 10.8 s of earcut fallback passes
+
+
+def test_triangulate_touching_holes_and_valid_input_still_fine():
+    sq = [(0, 0), (10, 0), (10, 10), (0, 10)]
+    h = [(5, 0), (3, 3), (7, 3)]               # touches the outer edge
+    verts, tris = g.triangulate(sq, [h[::-1]] if g.signed_area(h) > 0 else [h])
+    total = sum(abs(g.signed_area([verts[i] for i in t])) for t in tris)
+    assert total == pytest.approx(100 - abs(g.signed_area(h)))
+
+
+def test_triangulate_has_no_t_junctions_when_holes_line_up_on_a_diagonal():
+    sq = [(0, 0), (10, 0), (10, 10), (0, 10)]
+    h1 = [(2, 2), (4, 4), (4, 2)][::-1]
+    h2 = [(4, 4), (6, 4), (6, 6)][::-1]       # shares the vertex (4, 4); (2,2),(4,4),(6,6) are collinear
+    verts, tris = g.triangulate(sq, [h1, h2])
+    total = sum(abs(g.signed_area([verts[i] for i in t])) for t in tris)
+    assert total == pytest.approx(100 - 2 - 2)
+    # every undirected edge that is not a ring edge is shared by exactly two triangles, and no vertex
+    # lies strictly inside any triangle edge
+    for t in tris:
+        for u, v in ((t[0], t[1]), (t[1], t[2]), (t[2], t[0])):
+            for k, p in enumerate(verts):
+                if k in (u, v) or p in (verts[u], verts[v]):
+                    continue
+                cross = (verts[v][0] - verts[u][0]) * (p[1] - verts[u][1]) - (verts[v][1] - verts[u][1]) * (p[0] - verts[u][0])
+                dot = (p[0] - verts[u][0]) * (verts[v][0] - verts[u][0]) + (p[1] - verts[u][1]) * (verts[v][1] - verts[u][1])
+                ln = (verts[v][0] - verts[u][0]) ** 2 + (verts[v][1] - verts[u][1]) ** 2
+                assert not (abs(cross) < 1e-9 and 0 < dot < ln), (t, k)
+
+
+def test_normalize_rings_duplicate_rings():
+    sq = [(0, 0), (4, 0), (4, 4), (0, 4)]
+    rev = sq[::-1]
+    shifted = sq[2:] + sq[:2]
+    assert g.normalize_rings([sq, sq], "EVENODD") == []
+    assert g.normalize_rings([sq, shifted, rev], "EVENODD") != []        # odd count survives once
+    assert len(g.normalize_rings([sq, shifted, rev], "EVENODD")) == 1
+    # NONZERO: same orientation merges into one outer, opposite orientation cancels
+    assert len(g.normalize_rings([sq, sq], "NONZERO")) == 1
+    assert g.normalize_rings([sq, rev], "NONZERO") == []
+    # a hole inside a doubly-wound outer is still inside material (winding 2 + (-1) != 0)
+    inner = [(1, 1), (1, 3), (3, 3), (3, 1)]
+    res = g.normalize_rings([sq, sq, inner], "NONZERO")
+    assert len(res) == 1 and res[0][1] == []
+    res = g.normalize_rings([sq, inner], "NONZERO")
+    assert len(res) == 1 and len(res[0][1]) == 1
+    # EVENODD: a duplicated hole cancels and leaves a solid square
+    res = g.normalize_rings([sq, inner, inner], "EVENODD")
+    assert len(res) == 1 and res[0][1] == []

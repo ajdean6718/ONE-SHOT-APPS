@@ -1,6 +1,7 @@
 """Unit tests for seam_core.mesh (extrude, revolve, sweep, orient, place_origin, scale)."""
 
 import math
+import random
 from collections import Counter
 
 import pytest
@@ -421,3 +422,64 @@ def test_mesh_signature_is_stable_and_sensitive():
     nudged[0] = (nudged[0][0] + 1e-7, nudged[0][1], nudged[0][2])
     assert m.mesh_signature(nudged, mesh.faces) == s1  # below 5 decimals
     assert m.mesh_signature(mesh.verts, mesh.faces[::-1]) != s1
+
+
+# ---------------------------------------------------------------- touching rings, crossing rings
+
+def _pinch_report(mesh):
+    """(edges not used 2 or 4 times, edges used 4 times that are not vertical wall edges)."""
+    use = edge_use(mesh)
+    odd = [e for e, n in use.items() if n not in (2, 4)]
+    four_not_vertical = [e for e, n in use.items() if n == 4
+                         and not (mesh.verts[e[0]][:2] == mesh.verts[e[1]][:2])]
+    return odd, four_not_vertical
+
+
+@pytest.mark.parametrize("name,holes,hole_area", [
+    ("hole vertex on outer edge", [[(5.0, 0.0), (3.0, 3.0), (7.0, 3.0)]], 6.0),
+    ("hole vertex on outer vertex", [[(0.0, 0.0), (1.0, 2.0), (2.0, 1.0)]], 1.5),
+    ("two holes share a vertex", [[(2.0, 2.0), (4.0, 4.0), (4.0, 2.0)], [(4.0, 4.0), (6.0, 4.0), (6.0, 6.0)]], 4.0),
+    ("hole edge touches hole vertex", [[(2.0, 2.0), (2.0, 4.0), (4.0, 4.0), (4.0, 2.0)], [(4.0, 3.0), (6.0, 2.0), (6.0, 4.0)]], 6.0),
+])
+def test_extrude_touching_rings_is_watertight_with_correct_volume(name, holes, hole_area):
+    ccw_holes = []
+    for h in holes:
+        ccw_holes.append(h if g.signed_area(h) < 0 else h[::-1])
+    mesh = m.extrude([(SQ, ccw_holes)], 2.0)
+    mesh.validate()
+    odd, four = _pinch_report(mesh)
+    assert odd == [] and four == [], name
+    assert volume(mesh) == pytest.approx((100.0 - hole_area) * 2.0, abs=1e-9)
+    assert min(face_area(mesh, f) for f in mesh.faces) > 0.0
+    # the pinch point shares one vertex between the rings (no duplicate positions in a layer)
+    layer = [(round(x, 9), round(y, 9)) for x, y, z in mesh.verts if z > 0]
+    assert len(layer) == len(set(layer))
+
+
+def test_extrude_corner_touching_square_holes_are_watertight():
+    rng = random.Random(11)
+    checked = pinched = 0
+    for _ in range(80):
+        n = 6
+        missing = set()
+        for i in range(1, n - 1):
+            for j in range(1, n - 1):
+                if rng.random() < 0.45 and not any((i + di, j + dj) in missing for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1))):
+                    missing.add((i, j))     # never edge-adjacent, so holes only meet at corners
+        if not missing:
+            continue
+        outer = [(0.0, 0.0), (float(n), 0.0), (float(n), float(n)), (0.0, float(n))]
+        holes = [[(float(i), float(j)), (float(i), j + 1.0), (i + 1.0, j + 1.0), (i + 1.0, float(j))] for i, j in sorted(missing)]
+        mesh = m.extrude([(outer, holes)], 1.0)
+        odd, four = _pinch_report(mesh)
+        assert odd == [] and four == []
+        assert volume(mesh) == pytest.approx((n * n - len(missing)) * 1.0, abs=1e-9)
+        checked += 1
+        pinched += any(n_ == 4 for n_ in edge_use(mesh).values())
+    assert checked > 40 and pinched > 10
+
+
+def test_extrude_rejects_crossing_rings():
+    bow = [(0.0, 0.0), (4.0, 4.0), (4.0, 0.0), (0.0, 4.0)]
+    with pytest.raises(ValueError):
+        m.extrude([(bow, [])], 1.0)
