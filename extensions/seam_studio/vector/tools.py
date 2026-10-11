@@ -78,6 +78,61 @@ def screen_to_canvas(context, event_coord) -> Optional[Tuple[float, float]]:
     return float(local.x), float(local.y)
 
 
+class DrawSession:
+    """State of one drawing gesture: creates the object on the first update, then only updates parameters
+    (the shape / artboard producers regenerate the geometry). Used by the modal operator and by tests."""
+
+    def __init__(self, kind: str, radius: float = 16.0, sides: int = 5, inner_ratio: float = 0.5):
+        self.kind = kind
+        self.radius = radius
+        self.sides = sides
+        self.inner_ratio = inner_ratio
+        self.obj = None
+
+    def update(self, scene, p0, p1, square: bool = False, from_center: bool = False):
+        cx, cy, w, h, rot = drag_geometry(self.kind, p0, p1, square, from_center)
+        w = max(w, MIN_SIZE)
+        h = max(h, MIN_SIZE) if self.kind != "LINE" else 0.0
+        if self.kind == "ARTBOARD":
+            ab = self.obj
+            if ab is None:
+                name = canvas._next_name("Artboard", [a.name for a in canvas.artboards(scene)])
+                ab = canvas.new_artboard(scene, name, cx - w / 2, cy + h / 2, w, h)
+                self.obj = ab
+            ab.location.x, ab.location.y = cx - w / 2, cy + h / 2
+            ab.seam.artboard.width, ab.seam.artboard.height = w, h
+            return ab
+        ob = self.obj
+        if ob is None:
+            self.obj = shapes.create_shape(scene, self.kind, w, h, self.radius, self.sides, self.inner_ratio,
+                                           cx, cy, rot)
+            return self.obj
+        sh = ob.seam.shape
+        sh.width, sh.height = w, h
+        ob.location.x, ob.location.y = cx, cy
+        ob.rotation_euler.z = rot
+        return ob
+
+    def finish(self, context):
+        ob, self.obj = self.obj, None
+        scene = context.scene
+        engine.flush(scene)
+        if ob is not None:
+            if ob.seam.role == "ARTBOARD":
+                canvas.set_active_artboard(scene, ob)
+            shapes.select_only(context, ob)
+        return ob
+
+    def cancel(self):
+        ob, self.obj = self.obj, None
+        if ob is None:
+            return
+        data = ob.data
+        bpy.data.objects.remove(ob, do_unlink=True)
+        if data is not None and data.users == 0:
+            (bpy.data.meshes if isinstance(data, bpy.types.Mesh) else bpy.data.curves).remove(data)
+
+
 class SEAM_OT_draw_shape(bpy.types.Operator):
     bl_idname = "seam.draw_shape"
     bl_label = "Draw Shape"
@@ -95,59 +150,29 @@ class SEAM_OT_draw_shape(bpy.types.Operator):
     sides: IntProperty(name="Sides / Points", min=3, max=200, default=5)
     inner_ratio: FloatProperty(name="Inner Ratio", min=0.01, max=1.0, default=0.5)
 
+    _session = None
     _start = None
-    _obj = None
 
-    # ---- shared creation / update -------------------------------------------------
-    def _apply(self, context, p0, p1, create: bool):
-        scene = context.scene
-        cx, cy, w, h, rot = drag_geometry(self.kind, p0, p1, self.square, self.from_center)
-        w, h = max(w, MIN_SIZE), (max(h, MIN_SIZE) if self.kind != "LINE" else 0.0)
-        if self.kind == "ARTBOARD":
-            ab = self._obj
-            if ab is None:
-                ab = canvas.new_artboard(scene, canvas._next_name("Artboard", [a.name for a in canvas.artboards(scene)]),
-                                         cx - w / 2, cy + h / 2, w, h)
-                self._obj = ab
-            ab.location.x, ab.location.y = cx - w / 2, cy + h / 2
-            ab.seam.artboard.width, ab.seam.artboard.height = w, h
-            return ab
-        ob = self._obj
-        if ob is None:
-            ob = shapes.create_shape(scene, self.kind, w, h, self.radius, self.sides, self.inner_ratio, cx, cy, rot)
-            self._obj = ob
-            return ob
-        sh = ob.seam.shape
-        sh.width, sh.height = w, h
-        ob.location.x, ob.location.y = cx, cy
-        ob.rotation_euler.z = rot
-        return ob
+    def _new_session(self):
+        return DrawSession(self.kind, self.radius, self.sides, self.inner_ratio)
 
-    def _finish(self, context, ob):
-        scene = context.scene
-        engine.flush(scene)
-        if ob is not None and ob.seam.role == "ARTBOARD":
-            canvas.set_active_artboard(scene, ob)
-        if ob is not None:
-            shapes.select_only(context, ob)
-
-    # ---- exec path ------------------------------------------------------------------
+    # ---- exec path (explicit canvas coordinates) -----------------------------------
     def execute(self, context):
         if (self.x0, self.y0) == (self.x1, self.y1):
             self.report({"WARNING"}, "Zero-size drag: nothing drawn")
             return {"CANCELLED"}
         canvas.ensure_canvas(context.scene)
-        self._obj = None
+        sess = self._new_session()
         try:
-            ob = self._apply(context, (self.x0, self.y0), (self.x1, self.y1), True)
+            sess.update(context.scene, (self.x0, self.y0), (self.x1, self.y1), self.square, self.from_center)
         except NotImplementedError:
+            sess.cancel()
             self.report({"ERROR"}, "Shape kernels are not available in this build")
             return {"CANCELLED"}
-        self._finish(context, ob)
-        self._obj = None
+        sess.finish(context)
         return {"FINISHED"}
 
-    # ---- modal path -------------------------------------------------------------------
+    # ---- modal path ---------------------------------------------------------------------
     def invoke(self, context, event):
         if context.area is None or context.area.type != "VIEW_3D" or context.region_data is None:
             self.report({"ERROR"}, "Draw in a 3D viewport")
@@ -158,7 +183,7 @@ class SEAM_OT_draw_shape(bpy.types.Operator):
         if start is None:
             return {"CANCELLED"}
         self._start = start
-        self._obj = None
+        self._session = self._new_session()
         self.square, self.from_center = event.shift, event.alt
         context.window_manager.modal_handler_add(self)
         context.workspace.status_text_set("Drag to draw  |  Shift: square  |  Alt: from centre  |  Esc / RMB: cancel")
@@ -166,7 +191,8 @@ class SEAM_OT_draw_shape(bpy.types.Operator):
 
     def modal(self, context, event):
         if event.type in {"ESC", "RIGHTMOUSE"}:
-            self._cancel(context)
+            context.workspace.status_text_set(None)
+            self._session.cancel()
             return {"CANCELLED"}
         if event.type == "MOUSEMOVE":
             cur = screen_to_canvas(context, (event.mouse_region_x, event.mouse_region_y))
@@ -175,32 +201,21 @@ class SEAM_OT_draw_shape(bpy.types.Operator):
                 self.x0, self.y0 = self._start
                 self.x1, self.y1 = cur
                 try:
-                    self._apply(context, self._start, cur, False)
+                    self._session.update(context.scene, self._start, cur, self.square, self.from_center)
                 except NotImplementedError:
                     self.report({"ERROR"}, "Shape kernels are not available in this build")
-                    self._cancel(context)
+                    context.workspace.status_text_set(None)
+                    self._session.cancel()
                     return {"CANCELLED"}
                 engine.flush(context.scene, evaluate=False)
             return {"RUNNING_MODAL"}
         if event.type == "LEFTMOUSE" and event.value == "RELEASE":
             context.workspace.status_text_set(None)
-            if self._obj is None:
+            if self._session.obj is None:
                 return {"CANCELLED"}
-            ob = self._obj
-            self._obj = None
-            self._finish(context, ob)
+            self._session.finish(context)
             return {"FINISHED"}
         return {"RUNNING_MODAL"}
-
-    def _cancel(self, context):
-        context.workspace.status_text_set(None)
-        ob, self._obj = self._obj, None
-        if ob is None:
-            return
-        data = ob.data
-        bpy.data.objects.remove(ob, do_unlink=True)
-        if data is not None and data.users == 0:
-            (bpy.data.meshes if isinstance(data, bpy.types.Mesh) else bpy.data.curves).remove(data)
 
 
 # ------------------------------------------------------------------ workspace tools
