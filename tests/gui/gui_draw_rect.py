@@ -48,7 +48,7 @@ def scenario(h):
     with bpy.context.temp_override(window=h.window, screen=h.window.screen, area=area, region=region):
         bpy.ops.ed.undo()
     yield from h.wait(0.5)
-    h.check(not [o for o in scene.objects if o.name not in before and o.seam.role == "SHAPE"], "undo removes the shape")
+    h.check(not [o for o in bpy.context.scene.objects if o.name not in before and o.seam.role == "SHAPE"], "undo removes the shape")
 
 
 harness.main(scenario, name="gui_draw_rect")
