@@ -129,13 +129,20 @@ def _layer_of(scene, obj):
     return None
 
 
-def select_only(context, obj) -> None:
-    for o in context.view_layer.objects:
+def select_only(context, *objs) -> None:
+    """Select exactly ``objs`` (the last one becomes active)."""
+    want = [o for o in objs if o is not None]
+    names = {o.name for o in want}
+    context.view_layer.update()      # new objects get their view-layer base here
+    for o in list(context.view_layer.objects):
+        if o is None:
+            continue
         try:
-            o.select_set(o is obj)
+            o.select_set(o.name in names)
         except RuntimeError:
             pass
-    context.view_layer.objects.active = obj
+    if want:
+        context.view_layer.objects.active = want[-1]
 
 
 # ------------------------------------------------------------------ boolean core
@@ -336,12 +343,7 @@ class SEAM_OT_compound_release(bpy.types.Operator):
             self.report({"ERROR"}, "No compound shape selected")
             return {"CANCELLED"}
         canvas.restack(scene)
-        for o in context.view_layer.objects:
-            try:
-                o.select_set(o in made)
-            except RuntimeError:
-                pass
-        context.view_layer.objects.active = made[-1]
+        select_only(context, *made)
         self.report({"INFO"}, f"Released into {len(made)} shapes")
         return {"FINISHED"}
 

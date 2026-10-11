@@ -5,7 +5,7 @@ Export (``seam.svg_export``)
     ``svg.SvgImage`` items in canvas coordinates; ``seam_core.svg.export_svg`` writes the file.
     Bezier data is exported exactly (not flattened), transforms are baked into the paths, text is
     exported as outlines (``text_mode='OUTLINES'``, default) or as ``<text>`` (``'TEXT'``).  Clips
-    become ``<clipPath>`` via ``SvgShape.clip_paths``.  The artboard background is a first rect.
+    become ``<clipPath>`` via ``SvgShape.clip_paths``.  The artboard background rectangle is only added with ``include_background``.
 Import (``seam.svg_import``)
     Creates shapes with their styles in the active layer.  The artboard comes from the SVG
     viewBox/size (the pristine default artboard is resized, otherwise a new artboard is added to
@@ -19,7 +19,7 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 import bpy
-from bpy.props import EnumProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
 
 from .. import ids
@@ -31,7 +31,7 @@ from .clip import apply_clip
 from .export_png import (EXPORT_RESOLUTION, artboard_rect, artwork_in_order, canvas_paths, fill_rings,
                          gradient_geometry, gradient_stops, raster_bounds, raster_image_array, resolve_artboard,
                          rgba, rings_bounds)
-from .pathfinder import paths_center, translate_paths
+from .pathfinder import paths_center, select_only, translate_paths
 
 TEXT_MODES = [
     ("OUTLINES", "Outlines", "Export text as vector outlines (renders identically everywhere)"),
@@ -65,12 +65,13 @@ def _rect_path(x0: float, y0: float, x1: float, y1: float) -> BezierPath:
     return BezierPath([BezierPoint(p, p, p, "VECTOR", "VECTOR") for p in pts], True)
 
 
-def build_export_items(scene, artboard, text_mode: str = "OUTLINES", warnings: Optional[List[str]] = None):
+def build_export_items(scene, artboard, text_mode: str = "OUTLINES", warnings: Optional[List[str]] = None,
+                       include_background: bool = False):
     """Return (items, (x_left, y_top, width, height)) for ``svg.export_svg``."""
     ax, ay, aw, ah = artboard_rect(artboard)
     items: list = []
     ab = artboard.seam.artboard
-    if ab.background_enabled:
+    if include_background and ab.background_enabled:
         items.append(svg.SvgShape(name=f"{artboard.name} background", paths=[_rect_path(ax, ay - ah, ax + aw, ay)],
                                   style=svg.SvgStyle(fill=rgba(ab.background_color), stroke=None)))
     for obj in artwork_in_order(scene):
@@ -119,6 +120,8 @@ class SEAM_OT_svg_export(bpy.types.Operator, ExportHelper):
     text_mode: EnumProperty(name="Text", items=TEXT_MODES, default="OUTLINES")
     artboard: StringProperty(name="Artboard", default="",
                              description="Artboard name or SEAM id (empty = active artboard)")
+    include_background: BoolProperty(name="Include Background", default=False,
+                                     description="Add the artboard background colour as the first rectangle")
 
     def invoke(self, context, event):
         ab = resolve_artboard(context.scene, self.artboard)
@@ -142,7 +145,7 @@ class SEAM_OT_svg_export(bpy.types.Operator, ExportHelper):
         try:
             from ..engine import core as engine
             engine.flush(scene)
-            items, rect = build_export_items(scene, ab, self.text_mode, warnings)
+            items, rect = build_export_items(scene, ab, self.text_mode, warnings, self.include_background)
             text = svg.export_svg(items, rect, self.text_mode)
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(text)
@@ -260,7 +263,7 @@ class SEAM_OT_svg_import(bpy.types.Operator, ImportHelper):
         except NotImplementedError as exc:
             self.report({"ERROR"}, f"SVG import unavailable: {exc}")
             return {"CANCELLED"}
-        except ValueError as exc:
+        except Exception as exc:  # malformed XML / unsupported structure: say which file and why
             self.report({"ERROR"}, f"Invalid SVG '{os.path.basename(path)}': {exc}")
             return {"CANCELLED"}
         warnings = list(result.warnings)
@@ -297,12 +300,7 @@ class SEAM_OT_svg_import(bpy.types.Operator, ImportHelper):
         if len(warnings) > 20:
             self.report({"WARNING"}, f"... and {len(warnings) - 20} more import warnings")
         if created:
-            for o in context.view_layer.objects:
-                try:
-                    o.select_set(o in created)
-                except RuntimeError:
-                    pass
-            context.view_layer.objects.active = created[-1]
+            select_only(context, *created)
         self.report({"INFO"}, f"Imported {len(created)} shape(s) into artboard '{ab.name}' "
                     f"({result.width:g} x {result.height:g})")
         return {"FINISHED"}

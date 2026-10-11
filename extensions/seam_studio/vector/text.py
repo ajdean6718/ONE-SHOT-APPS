@@ -296,12 +296,7 @@ class SEAM_OT_text_to_outline(bpy.types.Operator):
             return {"CANCELLED"}
         for msg in problems:
             self.report({"WARNING"}, msg)
-        for o in context.view_layer.objects:
-            try:
-                o.select_set(o in made)
-            except RuntimeError:
-                pass
-        context.view_layer.objects.active = made[-1]
+        select_only(context, *made)
         engine.mark_dirty(f"outline:{made[-1].seam.id}")
         self.report({"INFO"}, f"Created {len(made)} live outline(s)")
         return {"FINISHED"}

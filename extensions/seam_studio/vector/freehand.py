@@ -123,24 +123,22 @@ class SEAM_OT_draw_freehand(bpy.types.Operator):
         except ValueError as exc:
             self.report({"ERROR"}, f"Invalid points: {exc}")
             return {"CANCELLED"}
-        return self._commit(context, pts, self.close_distance)
+        return self._commit(context, pts, self.close_distance, "ERROR")
 
-    def _commit(self, context, pts, close_distance):
+    def _commit(self, context, pts, close_distance, level="WARNING"):
         try:
             ob = commit_stroke(context, pts, self.smoothing, self.error, close_distance)
         except NotImplementedError as exc:
             self.report({"ERROR"}, f"Freehand fitting unavailable: {exc}")
             return {"CANCELLED"}
         if ob is None:
-            self.report({"WARNING"}, "Nothing drawn: the stroke needs at least two distinct points")
+            self.report({level}, "Nothing drawn: the stroke needs at least two distinct points")
             return {"CANCELLED"}
         select_only(context, ob)
         return {"FINISHED"}
 
     # -- modal drawing
     def invoke(self, context, event):
-        if self.points:
-            return self.execute(context)
         if context.area is None or context.area.type != "VIEW_3D" or context.region_data is None:
             self.report({"ERROR"}, "Freehand drawing needs a 3D viewport; use the points argument from scripts")
             return {"CANCELLED"}
