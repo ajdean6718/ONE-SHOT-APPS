@@ -4,3 +4,10 @@ node_modules/
 .claude/settings.local.json
 .claude/settings.json.bak-*
 __pycache__/
+# The Agency runtime state written by hooks
+.claude/.tool-call-tracker.jsonl
+.claude/metrics/
+.claude/session-state.json
+.claude/sessions/
+.claude/memory/
+.claude/projects/
