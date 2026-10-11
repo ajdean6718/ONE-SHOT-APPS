@@ -88,14 +88,7 @@ def _init_gradient_stops(style) -> None:
 
 
 def select_only(context, ob) -> None:
-    try:
-        for o in context.view_layer.objects:
-            if o.select_get():
-                o.select_set(False)
-        ob.select_set(True)
-        context.view_layer.objects.active = ob
-    except (RuntimeError, ReferenceError):
-        pass
+    canvas.select_only(context, [ob], ob)
 
 
 def artboard_center(scene):

@@ -1,7 +1,5 @@
 """Primitives: point counts / bounds, parametric regeneration, expand-on-hand-edit, operators."""
 
-import math
-
 import bpy
 import pytest
 
@@ -167,13 +165,13 @@ def test_shape_params_survive_save_and_reload(doc, blend_path):
     ob = _add("ROUNDED_RECT", width=120, height=60, radius=12, x=40, y=-40)
     name = ob.name
     flush()
-    scene = save_and_reload(blend_path)
+    save_and_reload(blend_path)
     ob = bpy.data.objects[name]
     assert ob.seam.shape.kind == "ROUNDED_RECT"
     assert (ob.seam.shape.width, ob.seam.shape.height, ob.seam.shape.radius) == pytest.approx((120, 60, 12))
     from seam_studio.engine import core
     core.request_revalidate()
-    res = core.flush()
+    core.flush()
     assert ob.seam.shape.kind == "ROUNDED_RECT"  # revalidation after load must not "expand" it
     assert _bounds(ob) == pytest.approx((-20, -70, 100, -10), abs=1e-2)
 

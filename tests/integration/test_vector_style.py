@@ -516,3 +516,71 @@ def test_undo_redo_rebuilds_derived_data_from_restored_sources(doc):
     assert ob.seam.style.stroke_enabled is True and _stroke_child(ob) is not None
     assert _emission(_mat(ob))[:3] == pytest.approx((0.0, 1.0, 0.0))
     assert len([o for o in bpy.data.objects if o.seam.role == "STROKE"]) == 1
+
+
+# ---------------------------------------------------------------- review regressions
+
+def test_linked_duplicate_becomes_single_user_and_flush_converges(doc):
+    ob = _rect()
+    ob.seam.style.fill_color = (1.0, 0.0, 0.0, 1.0)
+    flush()
+    bpy.ops.object.select_all(action="DESELECT")
+    ob.select_set(True)
+    bpy.context.view_layer.objects.active = ob
+    bpy.ops.object.duplicate(linked=True)
+    dup = bpy.context.active_object
+    assert dup is not ob
+    flush()
+    flush()
+    assert dup.data is not ob.data
+    assert ob.seam.id != dup.seam.id
+    assert _mat(ob).get("seam_owner") == ob.seam.id
+    assert _mat(dup).get("seam_owner") == dup.seam.id
+    assert _mat(ob) is not _mat(dup)
+    n_mats = len(bpy.data.materials)
+    dup.seam.style.fill_color = (0.0, 1.0, 0.0, 1.0)
+    flush()
+    res = flush()
+    assert all(r.status in ("skipped",) for r in res), [(r.key, r.status) for r in res if r.status != "skipped"]
+    assert len(bpy.data.materials) <= n_mats + 1
+    assert tuple(_mat(ob).diffuse_color)[:3] == pytest.approx((1.0, 0.0, 0.0), abs=1e-3)
+    assert tuple(_mat(dup).diffuse_color)[:3] == pytest.approx((0.0, 1.0, 0.0), abs=1e-3)
+
+
+def test_linking_object_data_does_not_ping_pong_materials(doc):
+    a = _rect()
+    b = _rect(x=300)
+    flush()
+    b.data = a.data  # Ctrl+L > Link Object Data
+    flush()
+    flush()
+    res = flush()
+    assert all(r.status == "skipped" for r in res), [(r.key, r.status) for r in res if r.status != "skipped"]
+    assert a.data is not b.data
+
+
+def test_deleting_a_styled_owner_removes_its_derived_datablocks(doc):
+    ob = _rect()
+    ob.seam.style.stroke_enabled = True
+    ob.seam.style.fill_type = "RADIAL"
+    flush()
+    sid = ob.seam.id
+    assert bpy.data.images.get("SEAM Gradient " + sid) is not None
+    bpy.data.objects.remove(ob, do_unlink=True)
+    flush()
+    assert not [o for o in bpy.data.objects if o.seam.role == "STROKE"]
+    assert bpy.data.images.get("SEAM Gradient " + sid) is None
+    assert not [m for m in bpy.data.materials if m.get("seam_owner") == sid]
+    assert not [c for c in bpy.data.curves if c.users == 0]
+
+
+def test_orphan_gradient_image_is_purged_by_revalidation(doc):
+    ob = _rect()
+    ob.seam.style.fill_type = "LINEAR"
+    flush()
+    sid = ob.seam.id
+    bpy.data.objects.remove(ob, do_unlink=True)  # no stroke -> no stroke-object update to react to
+    from seam_studio.engine import core
+    core.request_revalidate()
+    flush()
+    assert bpy.data.images.get("SEAM Gradient " + sid) is None

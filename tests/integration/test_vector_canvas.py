@@ -4,7 +4,7 @@ import bpy
 import pytest
 from mathutils import Vector
 
-from helpers import flush, make_curve, save_and_reload
+from helpers import flush, save_and_reload
 
 
 def _canvas():
@@ -251,3 +251,20 @@ def test_native_curve_add_lands_in_layer_and_is_adopted(seam):
     flush()
     shapes = [o for o in scene.objects if o.seam.role == "SHAPE"]
     assert len(shapes) == 2 and len({o.seam.id for o in shapes}) == 2
+
+
+# ---------------------------------------------------------------- review regressions
+
+def test_layers_create_false_never_writes(seam):
+    from seam_studio.vector import canvas
+    assert canvas.layers(bpy.context.scene, create=False) == []
+    assert bpy.data.collections.get(canvas.ARTWORK_NAME) is None
+    assert canvas.layers(bpy.context.scene) == []  # the default still creates the container
+    assert bpy.data.collections.get(canvas.ARTWORK_NAME) is not None
+
+
+def test_layer_panel_index_getter_does_not_create_collections(seam):
+    wm = bpy.context.window_manager
+    n = len(bpy.data.collections)
+    assert wm.seam_layer_index == 0
+    assert len(bpy.data.collections) == n

@@ -140,10 +140,13 @@ def _is_layer_collection(col) -> bool:
 
 # ------------------------------------------------------------------ layers
 
-def layers(scene=None) -> List[bpy.types.Collection]:
+def layers(scene=None, create: bool = True) -> List[bpy.types.Collection]:
+    """Layer collections, bottom first. ``create=False`` never writes data (use it in draw callbacks)."""
     scene = scene or bpy.context.scene
     art = bpy.data.collections.get(ARTWORK_NAME)
     if art is None or art.name not in scene.collection.children:
+        if not create:
+            return []
         art = artwork_collection(scene)
     return [c for c in art.children if _is_layer_collection(c)]
 
@@ -334,10 +337,16 @@ def artboard_rect(ob) -> Tuple[float, float, float, float]:
     return (x, y - ab.height, x + ab.width, y)
 
 
+def _ensure_material_nodes(mat) -> None:
+    """Make sure ``mat.node_tree`` exists. ``Material.use_nodes`` is deprecated in 5.x (nodes are always on
+    there), so it is only touched when the tree is missing and the property still exists (4.x)."""
+    if mat.node_tree is None and compat.rna_has(mat, "use_nodes"):
+        mat.use_nodes = True
+
+
 def flat_material_tree(mat) -> dict:
     """Ensure ``mat`` has the SEAM flat tree: Emission mixed with Transparent. Returns nodes by role."""
-    if mat.node_tree is None:
-        mat.use_nodes = True
+    _ensure_material_nodes(mat)
     nt = mat.node_tree
     need = ("SEAM_out", "SEAM_mix", "SEAM_transparent", "SEAM_emission")
     if not all(n in nt.nodes for n in need):
@@ -577,7 +586,85 @@ def canvas_bounds(obj, depsgraph=None, scene=None):
     return (float(xy[:, 0].min()), float(xy[:, 1].min()), float(xy[:, 0].max()), float(xy[:, 1].max()))
 
 
+def select_only(context, objs, active=None) -> None:
+    """Select exactly ``objs`` (None entries and objects missing from the view layer are skipped).
+
+    View-layer object lists can hold a ``None`` base right after ``bpy.data.objects.remove`` until the
+    view layer is resynced, so every access is guarded.
+    """
+    keep = {o.name for o in objs if o is not None}
+    try:
+        vl = context.view_layer
+        for o in list(vl.objects):
+            if o is None:
+                continue
+            try:
+                if o.name not in keep and o.select_get(view_layer=vl):
+                    o.select_set(False, view_layer=vl)
+            except (RuntimeError, ReferenceError):
+                continue
+        for o in objs:
+            if o is None:
+                continue
+            try:
+                o.select_set(True, view_layer=vl)
+            except (RuntimeError, ReferenceError):
+                continue
+        act = active if active is not None else next((o for o in objs if o is not None), None)
+        if act is not None:
+            vl.objects.active = act
+    except (RuntimeError, ReferenceError, AttributeError):
+        pass
+
+
+# ------------------------------------------------------------------ z slots inside groups
+
+def node_span(ob) -> float:
+    """z slot height of ``ob`` in its stack: Z_STEP for canvas-level artwork; inside a group the group's
+    own slot is shared out equally between its artwork children (recursively)."""
+    span = Z_STEP
+    chain = []
+    p = ob.parent
+    while p is not None and p.seam.role == "GROUP":
+        chain.append(p)
+        p = p.parent
+    for g in reversed(chain):
+        n = sum(1 for c in g.children if c.seam.role in ARTWORK_ROLES)
+        span /= max(n, 1)
+    return span
+
+
+def stroke_z(owner) -> float:
+    """Local z of a stroke child: half a slot above its owner, so it stays below the next sibling."""
+    return node_span(owner) * 0.5
+
+
+def fix_stroke_z(ob, recurse: bool = True) -> None:
+    """Re-seat the stroke children of ``ob`` (and of its descendants) at the right local z."""
+    if ob.seam.role in ("SHAPE", "TEXT"):
+        z = stroke_z(ob)
+        for ch in ob.children:
+            if ch.seam.role == "STROKE" and ch.location.z != z:
+                ch.location.z = z
+    if recurse:
+        for ch in ob.children:
+            if ch.seam.role in ARTWORK_ROLES:
+                fix_stroke_z(ch, True)
+
+
 # ------------------------------------------------------------------ adoption + id healing
+
+def ensure_single_user_data(ob) -> bool:
+    """SHAPE/TEXT objects own their curve data (materials and shape params live on it): a linked duplicate
+    (Alt+D, Ctrl+L) is made single-user. Returns True when the data was copied."""
+    if ob.seam.role not in ("SHAPE", "TEXT") or ob.type not in ("CURVE", "FONT"):
+        return False
+    data = ob.data
+    if data is None or data.users <= 1:
+        return False
+    ob.data = data.copy()
+    return True
+
 
 def _owned_stroke_parent(ob, sid) -> bool:
     for ch in ob.children:
@@ -607,6 +694,7 @@ def _heal_duplicate_ids(scene, touched) -> None:
             for key in list(dup.keys()):
                 if key.startswith("_seam_sig_"):
                     del dup[key]
+            ensure_single_user_data(dup)
             if dup.seam.role == "STROKE" and dup.seam.owner_id == old:
                 pass  # duplicated stroke children are removed by the stroke producer's healing
             _id_cache.pop(old, None)
@@ -669,6 +757,11 @@ def adoption_hook(scene, depsgraph) -> None:
         _heal_duplicate_ids(scene, [o for o in touched if o.seam.role != "NONE"])
     except ReferenceError:
         pass
+    for ob in touched:
+        try:
+            ensure_single_user_data(ob)
+        except ReferenceError:
+            continue
 
 
 # ------------------------------------------------------------------ operators
@@ -1002,7 +1095,7 @@ def _layer_index_get(self):
     art = bpy.data.collections.get(ARTWORK_NAME)
     if art is None:
         return 0
-    act = active_layer(scene) if layers(scene) else None
+    act = active_layer(scene) if layers(scene, create=False) else None
     for i, c in enumerate(art.children):
         if c == act:
             return i
@@ -1056,7 +1149,10 @@ class SEAM_PT_layers(bpy.types.Panel):
             layout.label(text="No canvas yet", icon="INFO")
             layout.operator("seam.canvas_new", icon="ADD")
             return
-        art = artwork_collection(scene)
+        art = bpy.data.collections.get(ARTWORK_NAME)  # read-only: draw callbacks must not write data
+        if art is None:
+            layout.label(text="No layers yet", icon="INFO")
+            return
         row = layout.row()
         row.template_list("SEAM_UL_layers", "", art, "children", context.window_manager, "seam_layer_index", rows=4)
         col = row.column(align=True)

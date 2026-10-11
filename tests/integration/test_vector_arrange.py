@@ -87,7 +87,6 @@ def test_arrange_operators_change_z_slots(doc):
 
 
 def test_arrange_stays_within_layer(doc):
-    from seam_studio.vector import canvas
     low = _add(name="Low")
     bpy.ops.seam.layer_add(name="Upper")
     up1 = _add(name="Up1")
@@ -191,7 +190,6 @@ def test_group_rejects_mixed_parents_and_layers(doc):
     b = _add(name="B", x=200)
     _select(a, b)
     bpy.ops.seam.group()
-    g = bpy.context.active_object
     c = _add(name="C", x=400)
     _select(a, c)  # a inside a group, c on the canvas
     with pytest.raises(RuntimeError, match="share one parent"):
@@ -397,3 +395,138 @@ def test_guides_add_and_clear(doc):
     assert bpy.ops.seam.guides_clear() == {"FINISHED"}
     assert not [o for o in doc.objects if o.seam.role == "GUIDE"]
     assert not bpy.ops.seam.guides_clear.poll()
+
+
+# ---------------------------------------------------------------- review regressions
+
+def _strokes_of(ob):
+    return [c for c in ob.children if c.seam.role == "STROKE"]
+
+
+@pytest.mark.parametrize("n", [1, 2, 3])
+@pytest.mark.parametrize("extra", [0, 1])
+def test_ungroup_works_for_any_child_count_and_base_order(doc, n, extra):
+    """A group of ONE shape (view-layer None base after removal) used to raise AttributeError mid-operator."""
+    kids = [_add(w=50, h=50, x=i * 100) for i in range(n)]
+    for _ in range(extra):
+        _add(w=10, h=10, x=900)
+    flush()
+    before = [k.matrix_world.copy() for k in kids]
+    _select(*kids)
+    assert bpy.ops.seam.group() == {"FINISHED"}
+    g = bpy.context.active_object
+    assert g.seam.role == "GROUP"
+    gname = g.name
+    _select(g)
+    assert bpy.ops.seam.ungroup() == {"FINISHED"}
+    flush()
+    assert gname not in bpy.data.objects
+    for k, m in zip(kids, before):
+        assert k.parent.seam.role == "CANVAS_ROOT"
+        assert max(abs(k.matrix_world[i][j] - m[i][j]) for i in range(4) for j in range(4)) < 1e-6
+        assert k.select_get()
+    assert bpy.context.view_layer.objects.active in kids
+
+
+def test_group_of_one_without_any_other_artwork_then_ungroup_undoably(doc):
+    ob = _add()
+    _select(ob)
+    assert bpy.ops.seam.group() == {"FINISHED"}
+    flush()
+    assert bpy.ops.seam.ungroup() == {"FINISHED"}
+    assert ob.parent.seam.role == "CANVAS_ROOT"
+
+
+def test_group_children_strokes_stay_below_next_sibling_and_next_object(doc):
+    obs = []
+    for i in range(3):
+        ob = _add(w=100, h=100, x=i * 20)
+        ob.seam.style.stroke_enabled = True
+        obs.append(ob)
+    flush()
+    top = _add(w=100, h=100)
+    flush()
+    _select(*obs)
+    assert bpy.ops.seam.group() == {"FINISHED"}
+    g = bpy.context.active_object
+    flush()
+    _select(g)
+    bpy.ops.seam.arrange(mode="BACK")  # compacts the group's children into its slot
+    flush()
+
+    def wz(o):
+        return o.matrix_world.translation.z
+
+    rows = [(wz(o), wz(_strokes_of(o)[0])) for o in obs]
+    for i in range(2):
+        assert rows[i][0] < rows[i][1] < rows[i + 1][0], rows
+    assert rows[2][1] < wz(top), rows
+    assert wz(g) <= rows[0][0] < rows[2][1] < wz(g) + 0.01 + 1e-9
+
+
+def test_nested_group_strokes_stay_inside_their_slot(doc):
+    a = _add(w=50, h=50, x=0)
+    b = _add(w=50, h=50, x=100)
+    c = _add(w=50, h=50, x=200)
+    for o in (a, b, c):
+        o.seam.style.stroke_enabled = True
+    flush()
+    _select(a, b)
+    bpy.ops.seam.group()
+    inner = bpy.context.active_object
+    _select(inner, c)
+    bpy.ops.seam.group()
+    outer = bpy.context.active_object
+    flush()
+    _select(outer)
+    bpy.ops.seam.arrange(mode="FRONT")
+    flush()
+    zs = sorted([o.matrix_world.translation.z for o in (a, b, c)]
+                + [_strokes_of(o)[0].matrix_world.translation.z for o in (a, b, c)])
+    z0 = outer.matrix_world.translation.z
+    assert zs[0] >= z0 - 1e-9 and zs[-1] < z0 + 0.01
+    # every stroke sits between its owner and the next higher fill
+    fills = sorted((o.matrix_world.translation.z, o) for o in (a, b, c))
+    for (z, o), nxt in zip(fills, fills[1:]):
+        assert z < _strokes_of(o)[0].matrix_world.translation.z < nxt[0]
+
+
+def test_ungroup_nonuniform_scaled_group_keeps_world_matrix_of_rotated_shape(doc):
+    """Shear (rotated child in a non-uniformly scaled group) is baked into the curve points."""
+    ob = _add(w=100, h=40, x=0, name="rot")
+    other = _add(w=100, h=40, x=500)
+    ob.rotation_euler.z = math.radians(30)
+    flush()
+    _select(ob, other)
+    assert bpy.ops.seam.group() == {"FINISHED"}
+    g = ob.parent
+    g.scale = (3.0, 1.0, 1.0)
+    flush()
+    import numpy as np
+    ev = ob.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    me = ev.to_mesh()
+    before = np.array([tuple(ob.matrix_world @ v.co) for v in me.vertices])
+    ev.to_mesh_clear()
+    _select(g)
+    assert bpy.ops.seam.ungroup() == {"FINISHED"}
+    flush()
+    ev = ob.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    me = ev.to_mesh()
+    after = np.array([tuple(ob.matrix_world @ v.co) for v in me.vertices])
+    ev.to_mesh_clear()
+    assert before.shape == after.shape
+    assert np.abs(before - after).max() < 1e-3
+    assert ob.seam.shape.kind == "NONE"  # the sheared geometry no longer matches a recipe
+
+
+def test_transform_panel_cache_is_scoped_to_draw(doc):
+    from seam_studio.vector import arrange
+    ob = _add(w=100, h=60)
+    flush()
+    with arrange.ui_cache():
+        a = arrange.ui_values(ob)
+        b = arrange.ui_values(ob)
+        assert a is b
+    ob.seam.shape.width = 200.0
+    flush()
+    assert arrange.ui_values(ob)[2] == pytest.approx(200.0)

@@ -34,7 +34,7 @@ from mathutils import Matrix
 from .. import ids
 from ..bridge import canvas_local_matrix, curve_paths, paths_signature, text_paths
 from ..engine import core as engine
-from ..seam_core import Z_STEP, geometry as core_geometry, stroke as core_stroke
+from ..seam_core import geometry as core_geometry, stroke as core_stroke
 from . import canvas
 
 STYLED_ROLES = ("SHAPE", "TEXT")
@@ -107,6 +107,37 @@ def _data_users(id_orig):
             yield ob
 
 
+def purge_owner_leftovers(sid: str) -> int:
+    """Remove the derived datablocks of a SEAM object that no longer exists: its gradient image, its (unused)
+    curve data and its SEAM material. Returns the number of datablocks removed."""
+    n = 0
+    img = bpy.data.images.get("SEAM Gradient " + sid)
+    if img is not None:
+        bpy.data.images.remove(img)
+        n += 1
+    mats = [m for m in bpy.data.materials if m.get("seam_owner") == sid]
+    for m in mats:
+        for coll in (bpy.data.curves,):
+            for cu in [c for c in coll if c.users == 0 and any(x is m for x in c.materials)]:
+                coll.remove(cu)
+                n += 1
+        if m.users == 0:
+            bpy.data.materials.remove(m)
+            n += 1
+    return n
+
+
+def _orphan_gradient_ids(scene) -> List[str]:
+    live = {o.seam.id for o in _shape_objects(scene) if o.seam.id}
+    out = []
+    for img in bpy.data.images:
+        if img.name.startswith("SEAM Gradient "):
+            sid = img.name[len("SEAM Gradient "):]
+            if sid not in live:
+                out.append(sid)
+    return out
+
+
 # ------------------------------------------------------------------ materials
 
 def _owned_material(ob) -> Optional[bpy.types.Material]:
@@ -120,6 +151,7 @@ def _owned_material(ob) -> Optional[bpy.types.Material]:
 
 
 def ensure_material(ob) -> bpy.types.Material:
+    canvas.ensure_single_user_data(ob)  # a datablock shared with another object would swap materials forever
     mat = _owned_material(ob)
     if mat is None:
         mat = bpy.data.materials.new("SEAM " + ob.name)
@@ -368,6 +400,8 @@ class GradientProducer(engine.Producer):
         for ob in _shape_objects(scene):
             if ob.seam.id:
                 yield "gradient:" + ob.seam.id
+        for sid in _orphan_gradient_ids(scene):
+            yield "gradient:" + sid
 
     def _obj(self, scene, key):
         ob = canvas.find_by_id(key.split(":", 1)[1], scene)
@@ -375,7 +409,10 @@ class GradientProducer(engine.Producer):
 
     def signature(self, scene, key):
         ob = self._obj(scene, key)
-        return None if ob is None else gradient_signature(ob)
+        if ob is None:
+            sid = key.split(":", 1)[1]
+            return "orphan" if bpy.data.images.get("SEAM Gradient " + sid) is not None else None
+        return gradient_signature(ob)
 
     def stored_signature(self, scene, key):
         ob = self._obj(scene, key)
@@ -384,7 +421,9 @@ class GradientProducer(engine.Producer):
     def build(self, scene, key, signature):
         ob = self._obj(scene, key)
         if ob is None:
-            return engine.BuildResult(key, "obsolete")
+            n = purge_owner_leftovers(key.split(":", 1)[1])
+            return engine.BuildResult(key, "ok", f"removed {n} leftover datablock(s)") if n else \
+                engine.BuildResult(key, "obsolete")
         sync_gradient(ob)
         canvas.set_sig(ob, "gradient", gradient_signature(ob))
         return engine.BuildResult(key, "ok")
@@ -429,7 +468,7 @@ def stroke_signature(owner, scene, depsgraph=None) -> str:
     cols = ",".join(sorted(c.name for c in owner.users_collection))
     return repr((_rgba(st.stroke_color), _r(st.stroke_width), st.stroke_cap, st.stroke_join, _r(st.miter_limit),
                  _r(st.opacity), _scale_key(smat), res, psig, owner.name, cols,
-                 owner.seam.id in _suspect))
+                 owner.seam.id in _suspect, round(canvas.stroke_z(owner), 8)))
 
 
 def valid_stroke_child(owner):
@@ -516,9 +555,11 @@ def sync_stroke(owner, scene, depsgraph=None) -> Optional[bpy.types.Object]:
         child.hide_select = True
         child.parent = owner
         child.matrix_parent_inverse = Matrix.Identity(4)
-        child.location = (0.0, 0.0, Z_STEP * 0.5)
+        child.location = (0.0, 0.0, canvas.stroke_z(owner))
         for ax in range(3):
             child.lock_location[ax] = child.lock_rotation[ax] = child.lock_scale[ax] = True
+    if child.location.z != canvas.stroke_z(owner):  # the owner may have moved into / out of a group
+        child.location.z = canvas.stroke_z(owner)
     # collections follow the owner
     want = list(owner.users_collection) or [scene.collection]
     for c in list(child.users_collection):
@@ -614,7 +655,9 @@ class StrokeProducer(engine.Producer):
         if owner is None:
             n = remove_strokes(scene, sid)
             _suspect.discard(sid)
-            return engine.BuildResult(key, "ok", f"removed {n} orphaned stroke object(s)")
+            _last_scale.pop(sid, None)
+            leftovers = purge_owner_leftovers(sid)
+            return engine.BuildResult(key, "ok", f"removed {n} orphaned stroke object(s), {leftovers} leftover datablock(s)")
         child = sync_stroke(owner, scene)
         if child is not None:
             canvas.set_sig(child, "stroke", stroke_signature(owner, scene))

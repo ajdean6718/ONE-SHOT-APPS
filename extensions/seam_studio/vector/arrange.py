@@ -11,6 +11,7 @@ Align modes: LEFT, CENTER_H, RIGHT, TOP, CENTER_V, BOTTOM. Distribute axis: X | 
 from __future__ import annotations
 
 import math
+from contextlib import contextmanager
 from typing import List, Optional, Sequence, Tuple
 
 import bpy
@@ -62,22 +63,33 @@ def _sibling_set(scene, ob) -> List[bpy.types.Object]:
 
 
 def _stack_base(scene, ob, count: int = 1) -> Tuple[float, float]:
-    """(base z, step) for the stack ``ob`` is in (group children stay within one Z_STEP slot)."""
+    """(base z, step) for the stack ``ob`` is in. Canvas-level artwork steps by Z_STEP per layer slot; the
+    children of a group share the group's slot equally (``canvas.node_span``), so a child's stroke (half a
+    slot above it) and a nested group's children always stay below the next sibling."""
     parent = ob.parent
     if parent is not None and parent.seam.role == "CANVAS_ROOT":
         layer = next((c for c in ob.users_collection if c in canvas.layers(scene)), None)
         li = canvas.layers(scene).index(layer) if layer is not None else 0
         return li * LAYER_STEP, Z_STEP
-    return 0.0, Z_STEP / (count + 1)
+    return 0.0, canvas.node_span(ob)
 
 
 def _compact_group(group) -> None:
-    """Keep the children of a group within one z slot of the group (sorted by current z)."""
+    """Spread the children of a group evenly over the group's z slot (sorted by current z)."""
     kids = [c for c in group.children if c.seam.role in ARTWORK]
     kids.sort(key=lambda o: (o.location.z, o.name))
-    step = Z_STEP / (len(kids) + 1)
     for i, c in enumerate(kids):
+        step = canvas.node_span(c)
         c.location.z = i * step
+        _after_z(c)
+
+
+def _after_z(o) -> None:
+    """Keep derived z offsets consistent after ``o`` got a new z / a new slot size."""
+    if o.seam.role == "GROUP":
+        _compact_group(o)
+    else:
+        canvas.fix_stroke_z(o, recurse=False)
 
 
 def reorder_stack(stack: List, selected: set, mode: str) -> List:
@@ -104,8 +116,7 @@ def reorder_stack(stack: List, selected: set, mode: str) -> List:
 def assign_stack_z(scene, ordered: Sequence, base: float, step: float) -> None:
     for i, o in enumerate(ordered):
         o.location.z = base + i * step
-        if o.type == "EMPTY" and o.seam.role == "GROUP":
-            _compact_group(o)
+        _after_z(o)
 
 
 # ------------------------------------------------------------------ canvas-space helpers
@@ -244,20 +255,11 @@ class SEAM_OT_group(bpy.types.Operator):
                 o.matrix_basis = g.matrix_basis.inverted_safe() @ old_mb
             if coll not in o.users_collection:
                 coll.objects.link(o)
-        # group takes the slot of its topmost member among its siblings
-        self._select(context, g)
+        for o in sel:
+            canvas.fix_stroke_z(o)  # the children's slots shrank to a share of the group's slot
+        canvas.select_only(context, [g], g)
         engine.flush(scene, evaluate=False)
         return {"FINISHED"}
-
-    @staticmethod
-    def _select(context, ob):
-        try:
-            for o in context.view_layer.objects:
-                o.select_set(False)
-            ob.select_set(True)
-            context.view_layer.objects.active = ob
-        except (RuntimeError, ReferenceError):
-            pass
 
 
 class SEAM_OT_ungroup(bpy.types.Operator):
@@ -286,6 +288,8 @@ class SEAM_OT_ungroup(bpy.types.Operator):
         scene = context.scene
         groups = self._groups(context)
         freed = []
+        lost = []
+        canvas.select_only(context, [])  # deselect first: removing a group leaves a None base in the view layer
         for g in groups:
             kids = [c for c in g.children if c.seam.role in ARTWORK]
             new_parent = g.parent
@@ -298,22 +302,48 @@ class SEAM_OT_ungroup(bpy.types.Operator):
                 c.matrix_parent_inverse = Matrix.Identity(4)
                 if pure:
                     c.location = (c.location.x + gl.x, c.location.y + gl.y, c.location.z + gl.z)
-                else:
-                    c.matrix_basis = gmb @ old_mb
+                elif not _apply_composed(c, gmb @ old_mb):
+                    lost.append(c.name)
                 freed.append(c)
             bpy.data.objects.remove(g, do_unlink=True)
         try:
-            for o in context.view_layer.objects:
-                o.select_set(False)
-            for c in freed:
-                c.select_set(True)
-            if freed:
-                context.view_layer.objects.active = freed[0]
-        except (RuntimeError, ReferenceError):
+            context.view_layer.update()
+        except RuntimeError:
             pass
+        for c in freed:
+            canvas.fix_stroke_z(c)
+        canvas.select_only(context, freed, freed[0] if freed else None)
         engine.flush(scene, evaluate=False)
+        if lost:
+            self.report({"WARNING"}, "Shear could not be kept for: " + ", ".join(lost[:5]) +
+                        (" ..." if len(lost) > 5 else ""))
         self.report({"INFO"}, f"Ungrouped {len(groups)} group(s)")
         return {"FINISHED"}
+
+
+def _apply_composed(c, composed) -> bool:
+    """Set the local transform of ``c`` to ``composed`` (a 4x4 that may contain shear).
+
+    Blender transforms are loc/rot/scale and cannot hold shear (rotated child inside a non-uniformly
+    scaled group). For curve shapes the residual shear is baked into the curve points (the shape is
+    expanded to a free path), so the world matrix of the geometry is unchanged. Returns False when
+    shear had to be dropped (groups, text).
+    """
+    loc, rot, scl = composed.decompose()
+    d = Matrix.LocRotScale(loc, rot, scl)
+    resid = d.inverted_safe() @ composed
+    shear = max(abs(resid[i][j] - (1.0 if i == j else 0.0)) for i in range(3) for j in range(3))
+    if shear <= 1e-6:
+        c.matrix_basis = composed
+        return True
+    if c.type == "CURVE" and c.seam.role == "SHAPE" and c.data is not None and c.data.users == 1:
+        if c.seam.shape.kind != "NONE":
+            c.seam.shape.kind = "NONE"
+        c.data.transform(resid)
+        c.matrix_basis = d
+        return True
+    c.matrix_basis = composed
+    return False
 
 
 # ------------------------------------------------------------------ align / distribute
@@ -482,8 +512,34 @@ def object_box(ob):
     return canvas.canvas_bounds(ob, bpy.context.evaluated_depsgraph_get(), _scene())
 
 
+_ui_cache: dict = {"on": False, "key": None, "vals": None}
+
+
+@contextmanager
+def ui_cache():
+    """Cache ``ui_values`` while a panel draws: its five properties read the same evaluated bounds, so they
+    are computed once instead of five times per redraw. Outside this context nothing is cached."""
+    _ui_cache.update(on=True, key=None, vals=None)
+    try:
+        yield
+    finally:
+        _ui_cache.update(on=False, key=None, vals=None)
+
+
 def ui_values(ob):
     """(x, y, w, h, rotation_deg) in canvas px, artboard-relative with Y down; None without geometry."""
+    if not _ui_cache["on"]:
+        return _ui_values_uncached(ob)
+    try:
+        key = ob.as_pointer()
+    except ReferenceError:
+        return None
+    if _ui_cache["key"] != key:
+        _ui_cache.update(key=key, vals=_ui_values_uncached(ob))
+    return _ui_cache["vals"]
+
+
+def _ui_values_uncached(ob):
     scene = _scene()
     b = object_box(ob)
     if b is None:
@@ -587,6 +643,7 @@ def _setter(field):
     def set_(self, value):
         if self.seam.role not in ARTWORK:
             return
+        _ui_cache["key"] = None
         if field == "rot":
             set_ui_rotation(self, value)
             return
@@ -627,6 +684,10 @@ class SEAM_PT_transform(bpy.types.Panel):
         return ob is not None and ob.seam.role in ARTWORK
 
     def draw(self, context):
+        with ui_cache():
+            self._draw(context)
+
+    def _draw(self, context):
         layout = self.layout
         ob = context.active_object
         unit = context.scene.seam.doc.units
