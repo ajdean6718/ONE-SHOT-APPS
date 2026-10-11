@@ -32,8 +32,6 @@ Adoption hook: new CURVE/FONT objects that land in a SEAM layer get role, id, ca
 
 from __future__ import annotations
 
-import math
-import traceback
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import bpy
@@ -826,15 +824,17 @@ def frame_rect_in_view(scene, area, region, space, rect, margin: float = 0.9) ->
     minx, miny, maxx, maxy = rect
     cx, cy = (minx + maxx) * 0.5, (miny + maxy) * 0.5
     prefs = bpy.context.preferences.view
-    smooth = prefs.smooth_view
+    smooth = getattr(prefs, "smooth_view", None)
     try:  # proper "Top Orthographic" view, applied instantly (an animated view would overwrite the values below)
-        prefs.smooth_view = 0
+        if smooth is not None:
+            prefs.smooth_view = 0
         with bpy.context.temp_override(area=area, region=region):
             bpy.ops.view3d.view_axis(type="TOP", align_active=False)
-    except (RuntimeError, TypeError):
+    except (RuntimeError, TypeError, AttributeError):
         pass
     finally:
-        prefs.smooth_view = smooth
+        if smooth is not None:
+            prefs.smooth_view = smooth
     r3d.view_perspective = "ORTHO"
     r3d.view_rotation = (1.0, 0.0, 0.0, 0.0)  # looking down -Z from +Z (top view)
     r3d.view_location = canvas_matrix(scene) @ Vector((cx, cy, 0.0))

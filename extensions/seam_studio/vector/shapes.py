@@ -11,14 +11,11 @@
 
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
-from mathutils import Vector
+from bpy.props import EnumProperty, FloatProperty, IntProperty
 
-from .. import ids
 from ..bridge import curve_paths, paths_signature, write_paths
 from ..engine import core as engine
 from ..seam_core import shapes as core_shapes

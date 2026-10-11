@@ -11,10 +11,9 @@ Align modes: LEFT, CENTER_H, RIGHT, TOP, CENTER_V, BOTTOM. Distribute axis: X | 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import bpy
-import numpy as np
 from bpy.props import BoolProperty, EnumProperty, FloatProperty
 from mathutils import Matrix, Vector
 

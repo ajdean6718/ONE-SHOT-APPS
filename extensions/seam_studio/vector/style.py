@@ -24,14 +24,14 @@ from __future__ import annotations
 
 import hashlib
 import math
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import bpy
 import numpy as np
 from bpy.props import IntProperty
 from mathutils import Matrix
 
-from .. import compat, ids
+from .. import ids
 from ..bridge import canvas_local_matrix, curve_paths, paths_signature, text_paths
 from ..engine import core as engine
 from ..seam_core import Z_STEP, geometry as core_geometry, stroke as core_stroke

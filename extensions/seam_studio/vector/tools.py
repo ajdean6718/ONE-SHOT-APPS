@@ -16,7 +16,7 @@ from typing import Optional, Tuple
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
 from bpy_extras import view3d_utils
-from mathutils import Matrix, Vector, geometry as mgeometry
+from mathutils import Vector, geometry as mgeometry
 
 from ..bridge import canvas_matrix
 from ..engine import core as engine
