@@ -203,3 +203,82 @@ def test_health_check_operator_reports(seam):
     _bad_link(scene, "Gear")
     assert bpy.ops.seam.health_check() == {"FINISHED"}   # problems are warnings, not exceptions
     assert health.last_report.summary() == "2 problems"
+
+
+# ------------------------------------------------------------------ stamping, save-time packing, performance
+
+def test_document_is_stamped_and_migrates_after_reopening(seam, tmp_path, monkeypatch):
+    """A document created by SEAM carries its schema version, so a later build can migrate it."""
+    from seam_studio.ui import document
+    scene = bpy.context.scene
+    assert not scene.seam.is_property_set("schema_version")
+    document.ensure_document(scene)
+    assert scene.seam.is_property_set("schema_version")
+    # a stamp is also written on save for scenes that gained content without ensure_document
+    other = bpy.data.scenes.new("Other")
+    other.seam.rasters.add().id = "r" * 16
+    assert not other.seam.is_property_set("schema_version")
+    path = str(tmp_path / "doc.blend")
+    scene = save_and_reload(path)
+    assert scene.seam.is_property_set("schema_version") and scene.seam.schema_version == 1
+    assert bpy.data.scenes["Other"].seam.is_property_set("schema_version")
+    # simulate a later build with schema 2 that registers a migration, then migrate the reopened file
+    import seam_studio.ui.health as h
+    monkeypatch.setattr(h, "SCHEMA_VERSION", 2)
+    monkeypatch.setitem(h.MIGRATIONS, 1, lambda sc: "added the thing")
+    assert h.migrate_scene(scene) == ["schema 1 -> 2: added the thing"]
+    assert scene.seam.schema_version == 2
+
+
+def test_save_does_not_stamp_foreign_or_newer_scenes(seam, tmp_path):
+    scene = bpy.context.scene
+    bpy.data.objects.new("plain", None)
+    bpy.ops.wm.save_as_mainfile(filepath=str(tmp_path / "plain.blend"))
+    assert not scene.seam.is_property_set("schema_version")       # nothing of SEAM in it
+    from seam_studio.ui import document
+    document.ensure_document(scene)
+    scene.seam.schema_version = 99
+    bpy.ops.wm.save_as_mainfile(filepath=str(tmp_path / "newer.blend"))
+    assert scene.seam.schema_version == 99                         # never downgraded
+
+
+def test_painted_raster_survives_save_and_reload(seam, tmp_path):
+    """Unsaved paint is packed by the save handler; painting again after a reload is kept as well."""
+    scene = bpy.context.scene
+    doc = scene.seam.rasters.add()
+    doc.id, doc.name = "e" * 16, "Canvas"
+    lay = doc.layers.add()
+    lay.name = "Layer 1"
+    img = bpy.data.images.new("SEAM Canvas Layer 1", 8, 8)
+    lay.image = img
+    img.pixels[0] = 0.5
+    assert img.is_dirty and img.packed_file is None
+    path = str(tmp_path / "paint.blend")
+    scene = save_and_reload(path)
+    img = bpy.data.images["SEAM Canvas Layer 1"]
+    assert abs(img.pixels[0] - 0.5) < 0.01
+    assert _health().health_report(scene).problems == []
+    img.pixels[1] = 0.25                     # paint again on the reloaded (packed) image
+    scene = save_and_reload(path)
+    img = bpy.data.images["SEAM Canvas Layer 1"]
+    assert abs(img.pixels[0] - 0.5) < 0.01 and abs(img.pixels[1] - 0.25) < 0.01
+
+
+def test_health_report_scales_linearly(seam):
+    """The orphan check must not scan the scene once per derived object (it ran in load_post on every open)."""
+    import time
+    from seam_studio.vector import canvas
+    scene = bpy.context.scene
+    canvas.ensure_canvas(scene)
+    owners = []
+    for i in range(1500):
+        ob = make_curve(f"s{i}")
+        owners.append(ob)
+    for i, owner in enumerate(owners):
+        child = make_curve(f"st{i}", role="STROKE")
+        child.seam.owner_id = owner.seam.id
+    t0 = time.perf_counter()
+    rep = _health().health_report(scene)
+    elapsed = time.perf_counter() - t0
+    assert rep.problems == []
+    assert elapsed < 0.5, f"health_report took {elapsed:.2f}s for 3000 objects"

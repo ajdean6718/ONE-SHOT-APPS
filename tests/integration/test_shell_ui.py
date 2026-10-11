@@ -173,6 +173,55 @@ def test_draw_to_3d_quickstart_sequence(seam, fake_ops):
     assert fake_ops["seam.make_3d"].calls == [{"recipe": "EXTRUDE"}]
 
 
+class _AddsStar(FakeOp):
+    """add_shape stand-in that really creates an object, like the vector operator does."""
+
+    def __call__(self, **kw):
+        from helpers import make_curve
+        super().__call__(**kw)
+        make_curve("Star")
+        return {"FINISHED"}
+
+
+class _PollFails(FakeOp):
+    def poll(self):
+        return False
+
+
+def test_draw_to_3d_failure_leaves_the_document_untouched(seam, fake_ops):
+    from seam_studio.ui import document
+    fake_ops["seam.add_shape"] = _AddsStar(("kind", "width", "height"))
+    fake_ops["seam.make_3d"] = FakeOp(("recipe",), result={"CANCELLED"})
+    document.ensure_document(bpy.context.scene)
+    before = sorted(o.name for o in bpy.context.scene.objects)
+    with pytest.raises(RuntimeError, match="Creating the live 3D result failed"):
+        bpy.ops.seam.draw_to_3d()
+    assert sorted(o.name for o in bpy.context.scene.objects) == before     # no half-made star left behind
+    assert "Star" not in bpy.data.curves
+    assert document.is_pristine(bpy.context.scene)                          # the Start panel stays
+
+
+def test_draw_to_3d_poll_failure_is_a_clean_error(seam, fake_ops):
+    fake_ops["seam.add_shape"] = _AddsStar(("kind", "width", "height"))
+    fake_ops["seam.make_3d"] = _PollFails(("recipe",))                      # e.g. nothing selected
+    with pytest.raises(RuntimeError, match="cannot run here"):
+        bpy.ops.seam.draw_to_3d()
+    assert not any(o.name.startswith("Star") for o in bpy.context.scene.objects)
+
+
+def test_paint_quickstart_failure_removes_partial_documents(seam, fake_ops):
+    class Half(FakeOp):
+        def __call__(self, **kw):
+            doc = bpy.context.scene.seam.rasters.add()
+            doc.id, doc.name = "f" * 16, "Half"
+            doc.layers.add().image = bpy.data.images.new("Half layer", 4, 4)
+            return {"CANCELLED"}
+    fake_ops["seam.raster_new"] = Half(("width", "height"))
+    with pytest.raises(RuntimeError, match="Creating the paint canvas failed"):
+        bpy.ops.seam.new_paint_canvas()
+    assert len(bpy.context.scene.seam.rasters) == 0 and "Half layer" not in bpy.data.images
+
+
 def test_draw_to_3d_needs_the_properties_it_passes(seam, fake_ops):
     fake_ops["seam.add_shape"] = FakeOp(("kind", "width"))    # no 'height': incompatible build
     fake_ops["seam.make_3d"] = FakeOp(("recipe",))

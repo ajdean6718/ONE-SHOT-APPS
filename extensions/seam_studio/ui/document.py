@@ -91,8 +91,10 @@ def ensure_document(scene=None, context=None) -> Tuple[object, bool]:
     """Make sure the scene has the SEAM canvas. Returns ``(canvas_root, created)``; new canvases follow preferences."""
     from ..vector import canvas
     scene = scene or bpy.context.scene
+    from . import health
     existed = has_canvas(scene)
     root = canvas.ensure_canvas(scene)
+    health.stamp_scene(scene)
     if not existed:
         set_standard_view_transform(scene)
         apply_new_document_defaults(scene, context)

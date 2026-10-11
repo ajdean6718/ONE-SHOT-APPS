@@ -190,7 +190,8 @@ def test_zips_install_with_blenders_own_operators(dist, tmp_path):
         "  'startup': os.path.exists(os.path.join(base, 'startup', 'bl_app_templates_user', 'seam', 'startup.blend'))}))\n")
     p = run([BLENDER, "--background", "--factory-startup", "--python-exit-code", "1", "--python-expr", expr],
             env={"BLENDER_USER_SCRIPTS": str(scripts), "BLENDER_USER_CONFIG": str(tmp_path / "config")})
-    if p.returncode != 0 or "RESULT" not in p.stdout:
-        pytest.skip("this Blender build has no legacy install operators: " + (p.stdout + p.stderr)[-300:])
+    if "has no attribute 'addon_install'" in p.stdout + p.stderr:
+        pytest.skip("this Blender build has no legacy install operators")
+    assert p.returncode == 0 and "RESULT" in p.stdout, (p.stdout + p.stderr)[-1500:]
     res = result_of(p)
     assert res == {"addon": ["FINISHED"], "tpl": ["FINISHED"], "addon_init": True, "core": True, "startup": True}

@@ -101,6 +101,28 @@ def migrate_scene(scene) -> List[str]:
     return applied
 
 
+def is_seam_scene(scene) -> bool:
+    """True when the scene belongs to SEAM (has a canvas root, artwork, raster documents or links)."""
+    if len(scene.seam.rasters) or len(scene.seam.links):
+        return True
+    return any(ob.seam.role != "NONE" for ob in scene.objects)
+
+
+def stamp_scene(scene) -> bool:
+    """Record :data:`SCHEMA_VERSION` in a scene SEAM owns, so a later build can tell which migrations to run.
+
+    Scenes SEAM never touched (no managed object, raster document or link) are left alone, and an existing stamp
+    is never changed. Returns True when the property was written.
+    """
+    seam = getattr(scene, "seam", None)
+    if seam is None or not is_seam_scene(scene):
+        return False
+    if seam.is_property_set("schema_version"):
+        return False      # already stamped: an older stamp is upgraded by migrate_scene, never silently here
+    seam.schema_version = SCHEMA_VERSION
+    return True
+
+
 # ------------------------------------------------------------------ checks
 
 def _abs(path: str, id_block=None) -> str:
@@ -159,7 +181,7 @@ def _check_images(scene, rep: HealthReport) -> None:
                         f"Raster document '{doc.name}': file for {what} not found: {img.filepath}", label)
         elif img.is_dirty:
             rep.add("INFO", "image_pending_pack",
-                    f"Raster document '{doc.name}': {what} has unsaved paint; it is packed when the file is saved.", label)
+                    f"Raster document '{doc.name}': {what} has unsaved paint; SEAM packs it into the .blend when you save.", label)
         # a clean generated image holds no painted pixels: nothing can be lost
     for img in bpy.data.images:
         if img.name in seen or img.type != "IMAGE" or img.source != "FILE" or not img.filepath:
@@ -188,6 +210,10 @@ def _check_fonts(scene, rep: HealthReport) -> None:
 
 def _check_objects(scene, rep: HealthReport) -> None:
     link_ids = {l.id for l in scene.seam.links}
+    by_id = {}
+    for ob in scene.objects:                      # one pass: owner lookups below are O(1)
+        if ob.seam.id:
+            by_id.setdefault(ob.seam.id, ob)
     has_artwork = False
     has_root = False
     for ob in scene.objects:
@@ -197,7 +223,7 @@ def _check_objects(scene, rep: HealthReport) -> None:
         elif role in _ARTWORK_ROLES:
             has_artwork = True
         if role in _DERIVED_ROLES:
-            owner = ids.find_object(ob.seam.owner_id, scene) if ob.seam.owner_id else None
+            owner = by_id.get(ob.seam.owner_id) if ob.seam.owner_id else None
             if owner is None:
                 rep.add("WARNING", "orphan_derived",
                         f"'{ob.name}' ({role.lower().replace('_', ' ')}) lost its owner object. "
@@ -284,16 +310,51 @@ def _on_load_post(*_args):
         print(f"SEAM health [{issue.severity}] {issue.message}")
 
 
+def pack_dirty_rasters(scene) -> int:
+    """Pack unsaved paint of SEAM raster layers/masks/selections into the file. Returns the number packed.
+
+    A generated image keeps its pixels only in memory; without packing, saving the .blend loses the painting.
+    External-file images are left alone (the user chose to link them).
+    """
+    n = 0
+    for _doc, _what, img, _required in _raster_images(scene):
+        if img is None or (img.source == "FILE" and img.packed_file is None):
+            continue        # an external-file image is the user's link; a reloaded packed image reports source FILE
+        if not (img.is_dirty or (img.packed_file is None and img.source == "GENERATED")):
+            continue
+        try:
+            img.pack()
+            n += 1
+        except Exception as exc:
+            print("SEAM: could not pack image", img.name, exc)
+    return n
+
+
+@persistent
+def _on_save_pre(*_args):
+    """Stamp the schema version on SEAM scenes and pack unsaved raster paint, so a saved file is self-contained."""
+    for scene in bpy.data.scenes:
+        try:
+            stamp_scene(scene)
+            pack_dirty_rasters(scene)
+        except Exception as exc:  # never block saving
+            print("SEAM: save_pre failed for scene", scene.name, exc)
+
+
 classes = (SEAM_OT_health_check,)
 
 
 def register():
     if _on_load_post not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_load_post)
+    if _on_save_pre not in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.append(_on_save_pre)
 
 
 def unregister():
     global last_report
     while _on_load_post in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_load_post)
+    while _on_save_pre in bpy.app.handlers.save_pre:
+        bpy.app.handlers.save_pre.remove(_on_save_pre)
     last_report = None
