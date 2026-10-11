@@ -73,8 +73,12 @@ class SEAM_PG_Link(bpy.types.PropertyGroup):
     params: PointerProperty(type=SEAM_PG_LinkParams)
     source_signature: StringProperty()
     target_signature: StringProperty()
+    # hash of the per-corner "UVMap" values and per-face material indices the last build wrote
+    target_data_signature: StringProperty()
     build_count: IntProperty()
     last_build_ms: FloatProperty()
+    # one-shot: the next build may discard downstream edits (set by Overwrite / Branch)
+    force_overwrite: BoolProperty(default=False, options={"HIDDEN"})
 
 
 classes = (SEAM_PG_LinkParams, SEAM_PG_Link)
