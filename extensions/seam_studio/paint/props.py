@@ -36,6 +36,8 @@ class SEAM_PG_RasterDoc(bpy.types.PropertyGroup):
     canvas: PointerProperty(name="Canvas Object", type=bpy.types.Object)
     material: PointerProperty(name="Material", type=bpy.types.Material)
     composite: PointerProperty(name="Composite Cache", type=bpy.types.Image)
+    sink: PointerProperty(name="Locked Paint Sink", type=bpy.types.Image,
+                          description="1x1 image that receives native strokes while the active layer is locked")
     selection: PointerProperty(name="Selection Mask", type=bpy.types.Image)
     has_selection: BoolProperty(default=False)
     background: EnumProperty(name="Background", items=[("TRANSPARENT", "Transparent", ""), ("WHITE", "White", ""),
