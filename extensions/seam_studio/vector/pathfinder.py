@@ -116,7 +116,7 @@ def shapes_to_rings(shapes) -> List[List[Tuple[float, float]]]:
 
 
 def make_shape_from_canvas_paths(scene, name: str, paths_canvas: Sequence[BezierPath], like=None, layer=None,
-                                 z: Optional[float] = None, on_top: bool = True):
+                                 z: Optional[float] = None):
     """New SHAPE with origin at the bbox center of ``paths_canvas`` (canvas coords); style copied from ``like``."""
     cx, cy = paths_center(paths_canvas)
     local = translate_paths(paths_canvas, -cx, -cy)
@@ -256,8 +256,7 @@ class SEAM_OT_pathfinder(bpy.types.Operator):
         bottom, top = objs[0], objs[-1]
         top_z = top.location.z
         layer = _layer_of(scene, top)
-        res = make_shape_from_canvas_paths(scene, f"{label} {bottom.name}", paths, like=bottom, layer=layer,
-                                           on_top=True)
+        res = make_shape_from_canvas_paths(scene, f"{label} {bottom.name}", paths, like=bottom, layer=layer)
         res.seam.style.fill_rule = "EVENODD"
         if not self.keep_originals:
             res.location.z = top_z

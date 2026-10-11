@@ -3,7 +3,6 @@
 import bpy
 import pytest
 
-from helpers import flush
 from test_vector_b_common import add_ellipse, add_rect, require, select, spline_area
 
 

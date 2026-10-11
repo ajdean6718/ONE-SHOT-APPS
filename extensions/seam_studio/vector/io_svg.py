@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import bpy
 from bpy.props import BoolProperty, EnumProperty, StringProperty

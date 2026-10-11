@@ -7,9 +7,8 @@ import bpy
 import numpy as np
 import pytest
 
-from helpers import flush, save_and_reload
-from test_vector_b_common import (add_ellipse, add_rect, curve_bbox, pixel, require, select, spline_area,
-                                  srgb8)
+from helpers import save_and_reload
+from test_vector_b_common import add_ellipse, add_rect, pixel, require, select, spline_area, srgb8
 
 PNG_KERNELS = ("geometry.flatten_path", "render2d.render", "raster.to_uint8_srgb", "png.encode_png",
                "png.decode_png")
@@ -386,3 +385,65 @@ def test_raster_objects_become_image_items(seam, tmp_path, monkeypatch):
     assert tuple(img[25, 125]) == (255, 0, 0, 255)
     assert tuple(img[75, 75]) == (0, 0, 255, 255)
     assert img[50, 20, 3] == 0                              # outside the raster plane
+
+
+FIXTURES = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                        "resources", "fixtures", "vector")
+
+
+def test_svg_import_fixture_gradients_transforms_style_attribute(seam):
+    require(*SVG_KERNELS, "geometry.flatten_path")
+    shapes = import_svg_into_fresh_file(os.path.join(FIXTURES, "shapes.svg"))
+    by_name = {o.name: o for o in shapes}
+    assert {"grad-linear", "grad-radial", "moved"} <= set(by_name)
+    from seam_studio.vector import canvas
+    from seam_studio.vector.export_png import canvas_paths
+    ab = canvas.artboards(bpy.context.scene)[0]
+    ax, ay = ab.location.x, ab.location.y
+
+    def bounds(o):
+        pts = [p.co for path in canvas_paths(o) for p in path.points]
+        return (min(p[0] for p in pts) - ax, min(p[1] for p in pts) - ay, max(p[0] for p in pts) - ax,
+                max(p[1] for p in pts) - ay)
+    lin = by_name["grad-linear"].seam.style
+    assert lin.fill_enabled and lin.fill_type == "LINEAR" and len(lin.gradient_stops) == 2
+    assert lin.gradient_angle == pytest.approx(0.0, abs=1e-6)
+    assert [round(s.position, 3) for s in lin.gradient_stops] == [0.0, 1.0]
+    assert tuple(round(c, 2) for c in lin.gradient_stops[0].color[:3]) == (0.0, 0.0, 0.0)
+    assert tuple(round(c, 2) for c in lin.gradient_stops[1].color[:3]) == (1.0, 1.0, 1.0)
+    rad = by_name["grad-radial"].seam.style
+    assert rad.fill_type == "RADIAL" and rad.stroke_enabled and rad.stroke_width == pytest.approx(3.0)
+    assert tuple(rad.gradient_center) == pytest.approx((0.5, 1.0 / 6.0 + 0.0), abs=1e-4)      # (150-120)/60, (-50+60)/60
+    assert rad.gradient_radius == pytest.approx(0.5, abs=1e-4)                                    # 30 / max(60, 60)
+    assert bounds(by_name["moved"]) == pytest.approx((10.0, -90.0, 30.0, -60.0), abs=0.01)         # translate(10 60), y flipped
+
+
+def test_svg_gradient_roundtrip(seam, tmp_path):
+    require(*SVG_KERNELS, "geometry.flatten_path")
+    import math
+    setup_artboard(300.0, 200.0, 0.0, 0.0)
+    scene = bpy.context.scene
+    lin = add_rect(scene, "Lin", 10, -150, 160, -50, color=(1, 1, 1, 1))
+    rad = add_rect(scene, "Rad", 180, -120, 280, -20, color=(1, 1, 1, 1))
+    for ob, kind in ((lin, "LINEAR"), (rad, "RADIAL")):
+        st = ob.seam.style
+        st.fill_type = kind
+        for pos, col in ((0.0, (1, 0, 0, 1)), (0.4, (0, 1, 0, 1)), (1.0, (0, 0, 1, 1))):
+            s = st.gradient_stops.add()
+            s.position, s.color = pos, col
+    lin.seam.style.gradient_angle = math.radians(30.0)
+    rad.seam.style.gradient_center = (0.25, 0.75)
+    rad.seam.style.gradient_radius = 0.4
+    p = str(tmp_path / "grad.svg")
+    bpy.ops.seam.svg_export(filepath=p)
+    assert "Gradient" in open(p, encoding="utf-8").read()
+    shapes = import_svg_into_fresh_file(p)
+    assert len(shapes) == 2
+    types = {o.seam.style.fill_type: o for o in shapes}
+    li, ra = types["LINEAR"].seam.style, types["RADIAL"].seam.style
+    assert li.gradient_angle == pytest.approx(math.radians(30.0), abs=1e-3)
+    assert [round(s.position, 3) for s in li.gradient_stops] == [0.0, 0.4, 1.0]
+    assert [tuple(round(c, 2) for c in s.color[:3]) for s in li.gradient_stops] == [(1.0, 0.0, 0.0), (0.0, 1.0, 0.0),
+                                                                                       (0.0, 0.0, 1.0)]
+    assert tuple(ra.gradient_center) == pytest.approx((0.25, 0.75), abs=1e-3)
+    assert ra.gradient_radius == pytest.approx(0.4, abs=1e-3)

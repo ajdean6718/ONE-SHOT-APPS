@@ -1,11 +1,10 @@
 """Clipping masks: derived viewport result, release, persistence, export (vector-b)."""
 
 import bpy
-import numpy as np
 import pytest
 
 from helpers import flush, save_and_reload
-from test_vector_b_common import add_ellipse, add_rect, mesh_area, pixel, require, select, srgb8
+from test_vector_b_common import add_rect, mesh_area, pixel, require, select, srgb8
 
 
 def clip_child(obj):

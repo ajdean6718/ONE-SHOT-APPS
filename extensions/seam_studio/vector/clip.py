@@ -42,7 +42,6 @@ from ..engine import core as engine
 from ..engine.core import BuildResult, Producer
 from ..seam_core import boolean2d, geometry
 from ..seam_core.geometry import Affine
-from . import canvas
 from .export_png import (EXPORT_RESOLUTION, artwork_in_order, canvas_paths, fill_rings, gradient_stops,
                          live_canvas_affine, resolve_rings, rgba, stroke_rings)
 

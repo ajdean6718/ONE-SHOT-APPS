@@ -21,7 +21,7 @@ working. SEAM adds:
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List
 
 import bpy
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, StringProperty
