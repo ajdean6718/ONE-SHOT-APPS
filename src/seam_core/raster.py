@@ -2,7 +2,8 @@
 
 Images are numpy float32 arrays H x W x 4 (row 0 = top), straight alpha.
 Layer pixels are stored 8-bit sRGB in Blender; convert with :func:`srgb_to_linear`.
-Compositing is done in scene-linear to match the Blender node tree (Mix nodes).
+Compositing is done in scene-linear to match the Blender node tree (Mix nodes) and follows the W3C
+*Compositing and Blending Level 1* model (source-over with a blend mode), see :func:`composite`.
 Blend formulas must match Blender's Mix node (``ramp_blend`` in Blender source)
 for the modes listed in BLEND_MODES; ``BLENDER_MIX_TYPE`` maps them to Mix ``blend_type``.
 """
@@ -174,10 +175,20 @@ def blend_rgb(mode: str, base: np.ndarray, layer: np.ndarray) -> np.ndarray:
 
 def composite(layers: Sequence[LayerSpec], height: int, width: int,
               background: Optional[Tuple[float, float, float, float]] = None) -> np.ndarray:
-    """Bottom-to-top composite. For each visible layer: f = layer.alpha * opacity * mask;
-    rgb = mix(prev_rgb, blend_rgb(mode, prev_rgb, layer_rgb), f) where prev alpha > 0, and
-    plain layer_rgb where prev alpha == 0; alpha = prev_a + f * (1 - prev_a).
-    background (linear RGBA) is the initial state; default transparent. Returns H x W x 4 linear.
+    """Bottom-to-top composite in scene-linear, straight alpha (W3C Compositing & Blending Level 1, source-over).
+
+    ``background`` (linear RGBA, straight alpha) is the initial backdrop; default fully transparent.  For every
+    visible layer, with backdrop colour ``Cb`` / alpha ``ab`` and layer colour ``Cs``::
+
+        as  = clip(layer_alpha * opacity * mask, 0, 1)
+        B   = blend_rgb(mode, Cb, Cs)                    # Blender Mix-node formula at full factor
+        Cs' = (1 - ab) * Cs + ab * B                     # the blend only acts where there is a backdrop
+        ao  = as + ab * (1 - as)
+        Co  = (as * Cs' + ab * Cb * (1 - as)) / ao       # Co = 0 where ao = 0
+
+    Equivalently ``Co = mix(Cb, Cs', as / ao)``.  For NORMAL this is exact Porter-Duff *over*; over an opaque
+    backdrop (``ab = 1``) it reduces to ``mix(Cb, B, as)`` (the previous behaviour of this function).  Pixels with
+    ``ao == 0`` are returned as transparent black.  Returns ``H x W x 4`` float32, linear, straight alpha.
     """
     height = int(height)
     width = int(width)
@@ -192,22 +203,24 @@ def composite(layers: Sequence[LayerSpec], height: int, width: int,
         src = np.asarray(lyr.rgba, dtype=np.float64)
         if src.shape != (height, width, 4):
             raise ValueError("layer shape %r does not match composite size %r" % (src.shape, (height, width, 4)))
-        f = src[..., 3] * float(lyr.opacity)
+        a_s = src[..., 3] * float(lyr.opacity)
         if lyr.mask is not None:
             m = np.asarray(lyr.mask, dtype=np.float64)
             if m.shape != (height, width):
                 raise ValueError("mask shape %r does not match composite size" % (m.shape,))
-            f = f * m
-        f = np.clip(f, 0.0, 1.0)
-        prev_rgb = out[..., :3]
-        prev_a = out[..., 3]
-        blended = blend_rgb(lyr.blend_mode, prev_rgb, src[..., :3]).astype(np.float64)
-        mixed = prev_rgb + (blended - prev_rgb) * f[..., None]
-        rgb = np.where((prev_a > 0.0)[..., None], mixed, src[..., :3])
-        # untouched pixels (f == 0) keep their previous colour, even when previously transparent
-        rgb = np.where((f > 0.0)[..., None], rgb, prev_rgb)
-        out[..., :3] = rgb
-        out[..., 3] = prev_a + f * (1.0 - prev_a)
+            a_s = a_s * m
+        a_s = np.clip(a_s, 0.0, 1.0)
+        c_b = out[..., :3]
+        a_b = out[..., 3]
+        c_s = src[..., :3]
+        blended = blend_rgb(lyr.blend_mode, c_b, c_s).astype(np.float64)
+        c_s2 = c_s + (blended - c_s) * a_b[..., None]                     # (1 - ab) * Cs + ab * B
+        a_o = a_s + a_b * (1.0 - a_s)
+        covered = a_o > 0.0
+        k = np.where(covered, a_s / np.where(covered, a_o, 1.0), 0.0)     # as / ao
+        rgb = c_b + (c_s2 - c_b) * k[..., None]                           # mix(Cb, Cs', as / ao)
+        out[..., :3] = np.where(covered[..., None], rgb, 0.0)
+        out[..., 3] = a_o
     return out.astype(np.float32)
 
 

@@ -161,3 +161,104 @@ def test_partial_alpha_stacks_with_blend_modes_match_composite(seam, kernel, tmp
     doc.layers[2].opacity = 0.7
     # looser than the opaque cases: Blender stores 8-bit textures alpha-premultiplied, which costs ~1 extra bit at alpha 0.75
     assert_matches(doc, tmp_path, atol=0.02)
+
+
+def assert_matches_8bit(doc, tmp_path, tol=2, min_alpha=0.05):
+    """Cycles render of the canvas material vs ``composite_array``, both encoded to 8-bit sRGB: within ``tol``/255."""
+    from seam_studio.seam_core import raster as R
+    flush()
+    got = render_canvas(doc, tmp_path)
+    want = rd().composite_array(doc)
+    g8 = R.to_uint8_srgb(np.concatenate([np.clip(got[..., :3], 0.0, 1.0), np.clip(got[..., 3:], 0.0, 1.0)], -1)).astype(int)
+    w8 = R.to_uint8_srgb(np.concatenate([np.clip(want[..., :3], 0.0, 1.0), want[..., 3:]], -1)).astype(int)
+    # alpha is stored linearly: compare it as a plain 8-bit value
+    ga = np.rint(np.clip(got[..., 3], 0.0, 1.0) * 255.0).astype(int)
+    wa = np.rint(want[..., 3] * 255.0).astype(int)
+    assert np.abs(ga - wa).max() <= tol, np.abs(ga - wa).max()
+    vis = want[..., 3] > min_alpha
+    d = np.abs(g8[..., :3] - w8[..., :3])[vis]
+    assert d.size == 0 or d.max() <= tol, (d.max(), np.argwhere(vis)[int(d.reshape(-1, 3).max(axis=1).argmax())])
+
+
+def semi_transparent(h, w, seed, lo=64, hi=224):
+    """Noise with every pixel partly transparent (alpha in [lo, hi])."""
+    px = noise(h, w, seed)
+    px[..., 3] = np.random.default_rng(seed + 1).integers(lo, hi + 1, (h, w))
+    return px
+
+
+def opaque_pixels(h, w, seed):
+    px = noise(h, w, seed)
+    px[..., 3] = 255
+    return px
+
+
+def test_semi_transparent_red_blue_matches_half_half_over(seam, kernel, tmp_path):
+    """The headline case: 50% red under 50% blue renders as 1/3 red + 2/3 blue at alpha 0.75 (not 0.5 / 0.5)."""
+    r = rd()
+    doc = fresh_doc(5, 4, "RB")
+    r.add_layer(doc, "Top")
+    red = np.zeros((4, 5, 4), np.uint8)
+    red[...] = (255, 0, 0, 255)
+    blue = np.zeros((4, 5, 4), np.uint8)
+    blue[...] = (0, 0, 255, 255)
+    paint_pixels(doc.layers[0], red)
+    paint_pixels(doc.layers[1], blue)
+    doc.layers[0].opacity = 0.5
+    doc.layers[1].opacity = 0.5
+    flush()
+    want = rd().composite_array(doc)
+    assert np.allclose(want[0, 0], [1.0 / 3.0, 0.0, 2.0 / 3.0, 0.75], atol=1e-6)
+    got = render_canvas(doc, tmp_path)
+    assert np.allclose(got[0, 0], want[0, 0], atol=2e-3), (got[0, 0], want[0, 0])
+    assert_matches_8bit(doc, tmp_path)
+
+
+@pytest.mark.parametrize("mode", ["NORMAL", "MULTIPLY", "SCREEN", "OVERLAY", "ADD"])
+@pytest.mark.parametrize("bg", ["TRANSPARENT", "COLOR"])
+def test_semi_transparent_layers_match_composite_8bit(seam, kernel, tmp_path, mode, bg):
+    """Acceptance: viewport (Cycles render of the canvas material) == export compositor within 2/255.
+
+    Pixels are opaque (exactly representable in Blender's premultiplied 8-bit texture storage); the layers are
+    semi-transparent through opacity and an 8-bit mask, so every backdrop alpha in (0, 1) is exercised.
+    """
+    r = rd()
+    doc = fresh_doc(6, 4, f"ST{mode}{bg}", bg)
+    if bg == "COLOR":
+        doc.background_color = (0.3, 0.6, 0.2, 0.5)
+    r.add_layer(doc, "Mid")
+    r.add_layer(doc, "Top")
+    for i, ly in enumerate(doc.layers):
+        paint_pixels(ly, opaque_pixels(4, 6, 500 + 7 * i))
+    r.add_mask(doc, 1, "WHITE")
+    r.add_mask(doc, 2, "WHITE")
+    for i in (1, 2):
+        m = np.random.default_rng(40 + i).integers(40, 256, (4, 6), dtype=np.uint8)
+        paint_pixels(doc.layers[i], np.stack([m, m, m, np.full_like(m, 255)], -1), mask=True)
+    doc.layers[0].opacity = 0.7
+    doc.layers[1].blend_mode = mode
+    doc.layers[1].opacity = 0.9
+    doc.layers[2].blend_mode = mode
+    doc.layers[2].opacity = 0.8
+    assert_matches_8bit(doc, tmp_path)
+
+
+@pytest.mark.parametrize("mode", ["NORMAL", "MULTIPLY", "SCREEN", "OVERLAY", "ADD"])
+def test_pixel_alpha_layers_match_composite_8bit(seam, kernel, tmp_path, mode):
+    """Semi-transparent *pixels* (alpha channel) on transparent layers: the anti-aliased-edge case.
+
+    Blender keeps 8-bit textures alpha-premultiplied, so the colour of a pixel with alpha a is only known to
+    about 1/(255 a): the texture node alone is off by up to 3/255 at alpha 0.25.  Alpha is therefore kept in
+    [0.75, 0.88] here (2/255 for the linear modes; OVERLAY's slope amplifies the storage error to 4/255).
+    """
+    r = rd()
+    doc = fresh_doc(6, 4, f"PX{mode}")
+    r.add_layer(doc, "Mid")
+    r.add_layer(doc, "Top")
+    for i, ly in enumerate(doc.layers):
+        paint_pixels(ly, semi_transparent(4, 6, 600 + 7 * i, lo=192, hi=224))
+    for i in (1, 2):
+        doc.layers[i].blend_mode = mode
+    doc.layers[1].opacity = 0.9
+    doc.layers[2].opacity = 0.8
+    assert_matches_8bit(doc, tmp_path, tol=4 if mode == "OVERLAY" else 2)

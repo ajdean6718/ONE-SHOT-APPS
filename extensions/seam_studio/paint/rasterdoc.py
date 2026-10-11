@@ -9,9 +9,11 @@ Data model (see docs/architecture.md D4)
   document's top-left corner, role ``RASTER``, parented to the canvas root through ``canvas.add_artwork_object``.
   Its mesh has two identical UV maps (``UVMap`` and ``SEAM Stencil``); the second one drives the native stencil mask.
 * The canvas material composites the visible layers bottom->top with Mix nodes (``compat.new_mix_rgb_node``,
-  blend types from ``raster.BLENDER_MIX_TYPE``; non-normal modes blend at full factor and then mix by
-  layer alpha x opacity x mask, exactly like the kernel).  Alpha accumulates with Math nodes, output = Emission mixed with Transparent (alpha blend).  The formulas are those of
-  ``seam_core.raster.composite`` which is used for export.
+  blend types from ``raster.BLENDER_MIX_TYPE``).  The chain implements the W3C Compositing & Blending Level 1
+  source-over model of ``seam_core.raster.composite`` (which is used for export): per layer
+  ``as = alpha x opacity x mask``, ``Cs' = mix(Cs, B(Cb, Cs), ab)``, ``ao = as + ab (1 - as)``,
+  ``Co = mix(Cb, Cs', as / ao)``, with B evaluated at factor 1 (Mix-node factor acts inside the blend formula).
+  Alpha accumulates with Math nodes, output = Emission mixed with Transparent (alpha blend).
 * Extra nodes: ``SEAM Composite`` (the cached composite image, the active node while NOT painting so that
   Solid/TEXTURE shows the whole picture) and ``SEAM Sink`` (a 1x1 image that is the paint target while the
   active layer is locked, so native strokes cannot change a locked layer).
@@ -631,10 +633,11 @@ def merge_down(doc, index: int):
 
     The result keeps the lower layer's name and blend mode.  The lower layer's mask and opacity are baked into its
     alpha first (its opacity becomes 1), and the upper layer contributes with its own opacity, blend mode and mask.
-    The composite model of ``seam_core.raster`` (a straight-alpha Mix chain) is not associative, so the look of the
-    document is preserved exactly (up to 8-bit rounding) only when the lower layer is opaque at full opacity with a
-    NORMAL blend mode, or when the upper layer's coverage is binary; otherwise it is approximate (the operator
-    measures and reports the difference).  Hidden layers have no look to preserve, so merging a pair where either
+    The look of the document is preserved exactly (up to 8-bit rounding) when both layers are NORMAL (Porter-Duff
+    *over* is associative), or when the lower layer is opaque at full opacity with a NORMAL blend mode (the upper blend
+    mode then sees the same backdrop as in the stack), or when the upper layer's coverage is binary; otherwise it is
+    approximate, because a blend mode depends on everything below the pair (the operator measures and reports the
+    difference).  Hidden layers have no look to preserve, so merging a pair where either
     layer is hidden raises ``ValueError``.  Returns the merged layer."""
     _check_index(doc, index)
     if index == 0:
@@ -1096,57 +1099,64 @@ def build_material(doc) -> None:
         if cur_rgb is None:  # nothing underneath: rgb = layer rgb, alpha = f
             cur_rgb, cur_a = layer_rgb, f_src
             continue
-        # kernel formula: rgb = mix(prev, blend(mode, prev, layer) at full factor, f).  The Mix node applies its factor
-        # *inside* the blend formula (not equivalent for dodge/burn), so non-normal modes use two Mix nodes:
-        # blend at factor 1, then a plain mix by f.
-        mix, fac, a_in, b_in, blended = compat.new_mix_rgb_node(nodes, R.BLENDER_MIX_TYPE[ly.blend_mode])
-        mix.label = ly.blend_mode.replace("_", " ").title()
-        mix.location = (x + 320.0, y)
-        if isinstance(cur_rgb, tuple):
-            a_in.default_value = cur_rgb
-        else:
-            links.new(cur_rgb, a_in)
-        links.new(layer_rgb, b_in)
-        if ly.blend_mode == "NORMAL":
-            links.new(f_src, fac)
-        else:
-            fac.default_value = 1.0
+        # W3C source-over (see seam_core.raster.composite): Cs' = (1-ab)*Cs + ab*B(Cb, Cs); ao = f + ab*(1-f);
+        # Co = mix(Cb, Cs', f/ao).  The Mix node applies its factor *inside* the blend formula (not equivalent for
+        # dodge/burn), so B is always evaluated at factor 1 and the mixes are separate plain-MIX nodes.
+        def feed(sock, value):  # constant tuple/float -> default value, otherwise a link
+            if isinstance(value, (tuple, float)):
+                sock.default_value = value
+            else:
+                links.new(value, sock)
+
+        mode = ly.blend_mode
+        opaque_below = isinstance(cur_a, float) and cur_a >= 1.0
+        blended = layer_rgb
+        if mode != "NORMAL":
+            bnode, bfac, b_a, b_b, blended = compat.new_mix_rgb_node(nodes, R.BLENDER_MIX_TYPE[mode])
+            bnode.label = mode.replace("_", " ").title()
+            bnode.location = (x + 320.0, y)
+            bfac.default_value = 1.0
+            feed(b_a, cur_rgb)
+            links.new(layer_rgb, b_b)
+            if not opaque_below:  # Cs' = mix(Cs, B, ab): the blend only acts where there is a backdrop
+                cnode, cfac, c_a, c_b, cres = compat.new_mix_rgb_node(nodes, "MIX")
+                cnode.label = "Blend where backdrop"
+                cnode.location = (x + 480.0, y + 240.0)
+                feed(cfac, cur_a)
+                links.new(layer_rgb, c_a)
+                links.new(blended, c_b)
+                blended = cres
+        if opaque_below:  # ab = 1: ao = 1, k = f, Cs' = B  ->  Co = mix(Cb, B, f)
             fmix, ffac, fa, fb, fres = compat.new_mix_rgb_node(nodes, "MIX")
             fmix.label = "By alpha x opacity x mask"
-            fmix.location = (x + 480.0, y + 120.0)
+            fmix.location = (x + 640.0, y)
             links.new(f_src, ffac)
-            if isinstance(cur_rgb, tuple):
-                fa.default_value = cur_rgb
-            else:
-                links.new(cur_rgb, fa)
+            feed(fa, cur_rgb)
             links.new(blended, fb)
-            blended = fres
-        if isinstance(cur_a, float) and cur_a >= 1.0:
-            cur_rgb, cur_a = blended, 1.0
-        elif isinstance(cur_a, float):  # constant partial background alpha > 0
-            mad = _math(nodes, "MULTIPLY_ADD", (x + 480.0, y), "Alpha")
-            links.new(f_src, mad.inputs[0])
+            cur_rgb, cur_a = fres, 1.0
+            continue
+        # general backdrop alpha: ao = f*(1-ab) + ab, k = f/ao (Blender's Divide returns 0 for a zero divisor)
+        mad = _math(nodes, "MULTIPLY_ADD", (x + 480.0, y - 360.0), "Alpha out")
+        links.new(f_src, mad.inputs[0])
+        if isinstance(cur_a, float):
             mad.inputs[1].default_value = 1.0 - cur_a
             mad.inputs[2].default_value = cur_a
-            cur_rgb, cur_a = blended, mad.outputs[0]
         else:
-            gt = _math(nodes, "GREATER_THAN", (x + 320.0, y - 200.0), "Below visible?")
-            links.new(cur_a, gt.inputs[0])
-            gt.inputs[1].default_value = 0.0
-            sel, sfac, sa, sb, sres = compat.new_mix_rgb_node(nodes, "MIX")
-            sel.label = "Below ? blend : layer"
-            sel.location = (x + 480.0, y)
-            links.new(gt.outputs[0], sfac)
-            links.new(layer_rgb, sa)
-            links.new(blended, sb)
-            om = _math(nodes, "SUBTRACT", (x + 320.0, y - 360.0), "1 - below")
+            om = _math(nodes, "SUBTRACT", (x + 320.0, y - 360.0), "1 - backdrop alpha")
             om.inputs[0].default_value = 1.0
             links.new(cur_a, om.inputs[1])
-            mad = _math(nodes, "MULTIPLY_ADD", (x + 480.0, y - 360.0), "Alpha")
-            links.new(f_src, mad.inputs[0])
             links.new(om.outputs[0], mad.inputs[1])
             links.new(cur_a, mad.inputs[2])
-            cur_rgb, cur_a = sres, mad.outputs[0]
+        kdiv = _math(nodes, "DIVIDE", (x + 640.0, y - 360.0), "Layer share")
+        links.new(f_src, kdiv.inputs[0])
+        links.new(mad.outputs[0], kdiv.inputs[1])
+        fmix, ffac, fa, fb, fres = compat.new_mix_rgb_node(nodes, "MIX")
+        fmix.label = "Backdrop to layer by share"
+        fmix.location = (x + 800.0, y)
+        links.new(kdiv.outputs[0], ffac)
+        feed(fa, cur_rgb)
+        links.new(blended, fb)
+        cur_rgb, cur_a = fres, mad.outputs[0]
 
     # ---- output: Emission over Transparent, alpha = accumulated alpha
     ox = len(doc.layers) * w + 600.0
