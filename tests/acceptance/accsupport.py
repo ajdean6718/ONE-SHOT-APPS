@@ -264,3 +264,79 @@ def artifacts_dir(*parts):
     d = os.path.join(root, "artifacts", "acceptance", *parts)
     os.makedirs(d, exist_ok=True)
     return d
+
+
+# ------------------------------------------------------------------ a brand new Blender process
+
+_CHILD_PRELUDE = '''
+import json, os, sys
+argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else sys.argv[1:]
+BLEND, OUT = argv[0], argv[1]
+ROOT = {root!r}
+for p in (ROOT + "/tests/acceptance", ROOT + "/tests", ROOT + "/src", ROOT + "/extensions"):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+import bpy, addon_utils
+if addon_utils.enable("seam_studio", default_set=True, handle_error=None) is None:
+    raise RuntimeError("seam_studio add-on did not enable")
+RESULT = {{}}
+'''
+
+_CHILD_EPILOGUE = '''
+with open(OUT, "w") as fh:
+    json.dump(RESULT, fh)
+sys.stdout.flush()
+os._exit(0)
+'''
+
+
+def run_fresh_process(body, blend_path, tmp_path, timeout=300):
+    """Run ``body`` (Python source; ``BLEND`` is the file path, fill the dict ``RESULT``) in a new process of the
+    same runtime - Blender binary or the ``bpy`` module - with the add-on enabled, and return RESULT."""
+    import json
+    import subprocess
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    script = os.path.join(str(tmp_path), "child_%d.py" % abs(hash(body)))
+    out = os.path.join(str(tmp_path), "child_out_%d.json" % abs(hash(body)))
+    with open(script, "w") as fh:
+        fh.write(_CHILD_PRELUDE.format(root=root) + body + _CHILD_EPILOGUE)
+    binary = bpy.app.binary_path
+    if binary and os.path.basename(binary).startswith("blender"):
+        cmd = [binary, "-b", "--factory-startup", "--python-exit-code", "1", "--python", script, "--", str(blend_path), out]
+    else:
+        cmd = [sys.executable, script, str(blend_path), out]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=dict(os.environ))
+    assert proc.returncode == 0 and os.path.exists(out), "child failed (%s)\n%s\n%s" % (
+        proc.returncode, proc.stdout[-3000:], proc.stderr[-3000:])
+    with open(out) as fh:
+        return json.load(fh)
+
+
+# ------------------------------------------------------------------ whole-project snapshot
+
+def project_snapshot():
+    """JSON-friendly description of every link, its source and its result (what a user would notice changing)."""
+    import hashlib
+    scene = bpy.context.scene
+    out = {}
+    for lk in scene.seam.links:
+        t, s = lk.target, lk.source
+        co = np.round(mesh_np(t), 5)
+        out[lk.id] = {
+            "recipe": lk.recipe, "state": lk.state, "stale": bool(lk.stale), "builds": int(lk.build_count),
+            "params": {k: (round(v, 6) if isinstance(v, float) else v) for k, v in
+                       ((k, getattr(lk.params, k)) for k in lk.params.bl_rna.properties.keys() if k != "rna_type")},
+            "source": s.name if s else None, "target": t.name if t else None,
+            "source_sig": lk.source_signature, "target_sig": lk.target_signature,
+            "mesh": hashlib.blake2b(co.tobytes(), digest_size=8).hexdigest(), "verts": int(len(co)),
+            "nodes": [[round(float(c), 4) for c in bp.co[:2]] for sp in s.data.splines for bp in sp.bezier_points]
+            if s is not None and s.type == "CURVE" else None,
+            "loc": [round(float(v), 5) for v in t.location], "rot": [round(float(v), 5) for v in t.rotation_euler],
+            "scale": [round(float(v), 5) for v in t.scale],
+            "modifiers": [(m.name, m.type) for m in t.modifiers],
+            "materials": [(m.name if m else None, [round(float(c), 4) for c in m.diffuse_color] if m else None)
+                          for m in t.data.materials],
+            "role": t.seam.role, "owner_id": t.seam.owner_id,
+        }
+    return out
