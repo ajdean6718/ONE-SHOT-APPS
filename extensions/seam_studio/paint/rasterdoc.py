@@ -235,6 +235,7 @@ def layer_array(layer) -> np.ndarray:
 
 def write_layer_array_srgb8(layer, rgba8: np.ndarray, touch: bool = True) -> None:
     a8 = np.asarray(rgba8, np.uint8)
+    ensure_baseline(layer, "img")
     write_image_srgb8(layer.image, a8)
     commit_pixels(layer, "img", a8)
     if touch:
@@ -261,6 +262,7 @@ def write_mask_array(layer, mask: np.ndarray, touch: bool = True) -> None:
     a8 = np.empty(v.shape + (4,), np.uint8)
     a8[..., 0] = a8[..., 1] = a8[..., 2] = v
     a8[..., 3] = 255
+    ensure_baseline(layer, "mask")
     write_image_srgb8(layer.mask, a8)
     commit_pixels(layer, "mask", a8)
     if touch:
@@ -324,6 +326,19 @@ def commit_pixels(holder, kind: str, a8: np.ndarray) -> int:
     _journal_put((holder.id, kind, rev), a8)
     _applied[(holder.id, kind)] = rev
     return rev
+
+
+def ensure_baseline(holder, kind: str) -> None:
+    """Journal the pixels the image holds *before* a SEAM write replaces them, when no entry exists for the current
+    revision.  After a file load the journal is empty, so without this the first edit of a session could not be
+    undone (the pre-edit revision had no snapshot to swap back in)."""
+    attr = _REV_ATTR[kind]
+    rev = int(getattr(holder, attr))
+    if (holder.id, kind, rev) in _journal:
+        return
+    img = _holder_image(holder, kind)
+    if img is not None and _applied.get((holder.id, kind), rev) == rev:
+        _journal_put((holder.id, kind, rev), read_image_srgb8(img))
 
 
 def snapshot_current(holder, kind: str) -> None:

@@ -17,11 +17,23 @@ LAYER_FLOOR = 1e-6
 
 # ------------------------------------------------------------------ operator driving
 
+STEPS = [0]   # undo steps pushed since start_session(): UNDO operators + explicit push()
+
+
 def op(fn, **kw):
     """Run an operator like a button press (undo step pushed); it must finish."""
     res = fn("EXEC_DEFAULT", True, **kw)
     assert res == {"FINISHED"}, "%s -> %s" % (getattr(fn, "idname", lambda: fn)(), res)
+    if "UNDO" in getattr(getattr(bpy.types, fn.idname(), None), "bl_options", ()):
+        STEPS[0] += 1
     return res
+
+
+def push(message="edit"):
+    """The undo step the UI pushes after a property edit (Python property writes push none)."""
+    bpy.ops.ed.undo_push(message=message)
+    STEPS[0] += 1
+    return STEPS[0]
 
 
 def flush():
@@ -32,6 +44,7 @@ def flush():
 def start_session():
     """Initialise the (background-mode) undo system with a first step, like opening a file in the GUI."""
     bpy.ops.ed.undo_push(message="SEAM acceptance start")
+    STEPS[0] = 0
 
 
 def new_canvas(width=800, height=600):
@@ -42,13 +55,15 @@ def new_canvas(width=800, height=600):
     return canvas.active_artboard(bpy.context.scene)
 
 
-def undo():
-    assert bpy.ops.ed.undo() == {"FINISHED"}
+def undo(n=1):
+    for _ in range(n):
+        assert bpy.ops.ed.undo() == {"FINISHED"}
     flush()
 
 
-def redo():
-    assert bpy.ops.ed.redo() == {"FINISHED"}
+def redo(n=1):
+    for _ in range(n):
+        assert bpy.ops.ed.redo() == {"FINISHED"}
     flush()
 
 

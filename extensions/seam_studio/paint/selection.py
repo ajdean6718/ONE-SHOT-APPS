@@ -52,6 +52,7 @@ def _write(doc, mask: np.ndarray) -> None:
     a8 = np.empty(v.shape + (4,), np.uint8)
     a8[..., 0] = a8[..., 1] = a8[..., 2] = v
     a8[..., 3] = 255
+    rd.ensure_baseline(doc, "sel")
     rd.write_image_srgb8(img, a8)
     rd.commit_pixels(doc, "sel", a8)
 
