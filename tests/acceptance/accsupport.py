@@ -97,8 +97,10 @@ def add_shape(kind, x, y, width, height, color=None, **kw):
     return ob
 
 
-def move_nodes(ob, indices, dx=0.0, dy=0.0, spline=0):
-    """Select control points ``indices`` of ``ob`` in Edit Mode and translate them (handles follow) with G."""
+def move_nodes(ob, indices, dx=0.0, dy=0.0, spline=0, stay_in_edit_mode=False):
+    """Select control points ``indices`` of ``ob`` in Edit Mode and translate them (handles follow) with G.
+
+    ``stay_in_edit_mode`` keeps the object in Edit Mode afterwards (the caller must leave it)."""
     select(ob)
     bpy.ops.object.mode_set(mode="EDIT")
     try:
@@ -110,7 +112,10 @@ def move_nodes(ob, indices, dx=0.0, dy=0.0, spline=0):
                 bp.select_right_handle = on
         res = bpy.ops.transform.translate("EXEC_DEFAULT", True, value=(dx, dy, 0.0))
         assert res == {"FINISHED"}, res
-    finally:
+    except BaseException:
+        bpy.ops.object.mode_set(mode="OBJECT")
+        raise
+    if not stay_in_edit_mode:
         bpy.ops.object.mode_set(mode="OBJECT")
     flush()
 
