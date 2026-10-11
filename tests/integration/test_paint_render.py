@@ -1,13 +1,11 @@
 """Paint: the canvas material (node tree) renders like seam_core.raster.composite (Cycles CPU, tiny canvases)."""
 
-import os
-
 import numpy as np
 import pytest
 
 import bpy
 
-from test_paint_support import flush, kernel, new_doc, noise, paint_pixels, rd, solid  # noqa: F401
+from test_paint_support import flush, kernel, new_doc, noise, paint_pixels, rd  # noqa: F401  (kernel = fixture)
 
 
 def render_canvas(doc, tmp_path):

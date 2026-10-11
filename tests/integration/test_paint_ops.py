@@ -5,7 +5,7 @@ import pytest
 
 import bpy
 
-from test_paint_support import flush, kernel, new_doc, noise, paint_pixels, pixels, rd, solid  # noqa: F401
+from test_paint_support import flush, new_doc, pixels, rd
 
 ALL_OPS = ["raster_activate", "raster_remove", "raster_layer_add", "raster_layer_remove", "raster_layer_duplicate", "raster_layer_move",
            "raster_layer_merge_down", "raster_mask_add", "raster_mask_apply", "raster_mask_remove",

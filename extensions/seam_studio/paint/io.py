@@ -9,7 +9,7 @@ import zlib
 
 import bpy
 import numpy as np
-from bpy.props import BoolProperty, EnumProperty, StringProperty
+from bpy.props import EnumProperty, StringProperty
 
 from ..seam_core import png
 from ..seam_core import raster as R

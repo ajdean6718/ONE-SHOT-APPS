@@ -1,12 +1,11 @@
 """Paint: undo/redo of pixel edits (pixel journal), orphan purge, resize persistence."""
 
 import numpy as np
-import pytest
 
 import bpy
 
 from helpers import save_and_reload
-from test_paint_support import flush, kernel, new_doc, noise, paint_pixels, pixels, rd, solid  # noqa: F401
+from test_paint_support import flush, kernel, new_doc, noise, paint_pixels, pixels, rd  # noqa: F401  (kernel = fixture)
 
 
 def base_steps():

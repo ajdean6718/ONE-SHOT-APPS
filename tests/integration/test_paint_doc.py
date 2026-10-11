@@ -6,7 +6,7 @@ import pytest
 import bpy
 
 from helpers import save_and_reload
-from test_paint_support import flush, kernel, new_doc, noise, paint_pixels, pixels, rd, solid  # noqa: F401
+from test_paint_support import flush, new_doc, noise, paint_pixels, pixels, rd
 
 
 def image_nodes(doc):
