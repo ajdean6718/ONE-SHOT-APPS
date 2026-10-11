@@ -141,7 +141,7 @@ class SEAM_PT_paint_selection(bpy.types.Panel):
         row.operator("seam.raster_select_all", text="All")
         row.operator("seam.raster_select_none", text="None")
         row.operator("seam.raster_select_invert", text="Invert")
-        layout.label(text="Selection active: brushes paint inside it" if doc.has_selection else "No selection",
+        layout.label(text="Painting inside selection" if doc.has_selection else "No selection",
                      icon="RESTRICT_SELECT_OFF" if doc.has_selection else "RESTRICT_SELECT_ON")
 
 

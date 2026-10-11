@@ -2,8 +2,9 @@
 
 A selection is a float mask (1 = selected) stored in the 8-bit Non-Color image ``doc.selection`` (white =
 selected).  When a selection exists it is wired to the native stencil of Texture Paint
-(``tool_settings.image_paint.use_stencil_layer`` / ``stencil_image``, using the canvas mesh's second UV map) so
-native brushes only paint inside it.  ``doc.has_selection == False`` means "no selection" (everything editable).
+(``tool_settings.image_paint.use_stencil_layer`` / ``stencil_image`` / ``invert_stencil``, sampled through the
+canvas mesh's second UV map) so native brushes only paint inside it.  Verified with real native strokes in the
+4.0.2 GUI: with ``invert_stencil`` False Blender paints where the stencil is black, hence the inversion.  ``doc.has_selection == False`` means "no selection" (everything editable).
 Coordinates are canvas pixels, (0, 0) = top-left corner of the top-left pixel, y down.
 """
 
@@ -151,7 +152,9 @@ def sync_stencil(doc) -> None:
     ip = scene.tool_settings.image_paint
     if doc.has_selection and doc.selection is not None:
         ip.stencil_image = doc.selection
-        ip.invert_stencil = False
+        # Blender's project paint treats the stencil as "paint where it is BLACK" unless invert is set
+        # (measured on 4.0.2, GUI): the selection is white inside, so invert it.
+        ip.invert_stencil = True
         ip.use_stencil_layer = True
         obj = doc.canvas
         if obj is not None and obj.type == "MESH":
@@ -163,6 +166,7 @@ def sync_stencil(doc) -> None:
         cur = ip.stencil_image
         if cur is None or _is_seam_selection(scene, cur):
             ip.use_stencil_layer = False
+            ip.invert_stencil = False
 
 
 # --------------------------------------------------------------------------- outline (pure + GUI overlay)

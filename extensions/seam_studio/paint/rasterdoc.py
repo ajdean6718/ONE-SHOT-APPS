@@ -1020,9 +1020,10 @@ def sync_paint_target(doc) -> None:
         return
     ma = doc.material
     nodes = ma.node_tree.nodes
-    for n in nodes:
-        n.select = n == node
-    nodes.active = node
+    if nodes.active != node:  # avoid redundant writes: every node tree write re-triggers material updates
+        for n in nodes:
+            n.select = n == node
+        nodes.active = node
     if paint_mode_active(doc):
         # slots are only valid after Blender refreshed them (entering paint mode); never touch them before
         imgs = list(ma.texture_paint_images)

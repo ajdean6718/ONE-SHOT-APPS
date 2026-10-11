@@ -190,7 +190,7 @@ def test_selection_ops_and_stencil(seam, kernel, blend_path):
     m = sel.selection_array(doc)
     assert doc.has_selection and m.shape == (8, 10)
     assert (m[1:5, 2:6] == 1).all() and m.sum() == 16
-    assert ip.use_stencil_layer and ip.stencil_image == doc.selection and not ip.invert_stencil
+    assert ip.use_stencil_layer and ip.stencil_image == doc.selection and ip.invert_stencil  # white = paintable
     assert doc.selection.colorspace_settings.name == "Non-Color"
     assert doc.canvas.data.uv_layers[doc.canvas.data.uv_layer_stencil_index].name == "SEAM Stencil"
     # add / subtract / intersect
@@ -230,6 +230,7 @@ def test_selection_ops_and_stencil(seam, kernel, blend_path):
     doc = bpy.context.scene.seam.rasters[0]
     assert not doc.has_selection and sel.selection_array(doc) is None
     assert not bpy.context.scene.tool_settings.image_paint.use_stencil_layer
+    assert not bpy.context.scene.tool_settings.image_paint.invert_stencil
     assert not bpy.ops.seam.raster_select_none.poll() and not bpy.ops.seam.raster_select_invert.poll()
 
 
@@ -451,3 +452,26 @@ def test_resample_is_premultiplied_and_exact_on_identity(seam):
     t[0, 0] = (255, 0, 0, 255)  # one opaque red pixel in a transparent field
     out = r.resample_rgba8(t, 1, 1)
     assert out[0, 0, 3] == 64 and out[0, 0, 0] == 255 and out[0, 0, 1] == 0  # no darkening of the colour
+
+
+def test_async_composite_path(seam, engine, kernel, monkeypatch):
+    """Large documents compute the composite on a worker thread; stale results are dropped."""
+    import time
+    from seam_studio.seam_core import raster as R
+    r = rd()
+    monkeypatch.setattr(r, "ASYNC_PIXELS", 1)
+    doc = new_doc(8, 6, "As")
+    flush()
+    r.write_layer_array(doc.layers[0], np.stack([np.full((6, 8), v, np.float32) for v in (0, 1, 0, 1)], -1))
+    res = engine.flush(evaluate=False, wait_async=False)
+    assert any(x.key == f"rastercache:{doc.id}" and x.status == "waiting" for x in res)
+    deadline = time.time() + 5
+    done = False
+    while time.time() < deadline and not done:
+        time.sleep(0.02)
+        done = any(x.status == "ok" for x in engine.flush(evaluate=False, wait_async=False)
+                   if x.key == f"rastercache:{doc.id}")
+    assert done
+    doc = bpy.context.scene.seam.rasters[0]
+    assert tuple(pixels(doc.composite)[0, 0]) == (0, 255, 0, 255)
+    assert np.array_equal(pixels(doc.composite), R.to_uint8_srgb(r.composite_array(doc)))

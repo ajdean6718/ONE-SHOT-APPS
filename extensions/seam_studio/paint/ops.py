@@ -77,6 +77,27 @@ def _focus_canvas(context, doc):
     return obj
 
 
+def frame_canvas(context, doc) -> bool:
+    """GUI only: top orthographic view of the canvas fitted to the 3D viewport. Returns True when applied."""
+    area, region, rv3d = context.area, context.region, context.region_data
+    if area is None or area.type != "VIEW_3D" or rv3d is None or region is None or doc.canvas is None:
+        return False
+    try:
+        bpy.ops.view3d.view_axis(type="TOP")
+    except RuntimeError:
+        return False
+    from mathutils import Vector
+    w, h = doc.width, doc.height
+    centre = doc.canvas.matrix_world @ Vector((w / 2.0, -h / 2.0, 0.0))
+    # ortho view: the visible width is (72 / lens) * view_distance; fit the canvas with a 10 % margin
+    k = 72.0 / max(1.0, area.spaces.active.lens)
+    aspect = max(0.1, region.width / max(1.0, float(region.height)))
+    visible_w = max(w, h * aspect) / 0.9
+    rv3d.view_location = centre
+    rv3d.view_distance = max(1.0, visible_w / k)
+    return True
+
+
 class _LayerOp:
     """Common base for operators acting on a layer of the active document (``index`` -1 = active layer)."""
     bl_options = {"REGISTER", "UNDO"}
@@ -395,12 +416,8 @@ class SEAM_OT_raster_paint_mode(bpy.types.Operator):
         if layer is not None and layer.locked:
             self.report({"WARNING"}, "The active layer is locked: strokes are discarded until it is unlocked")
         rd.start_paint_watch(doc)
-        if self.frame_view and context.area is not None and context.area.type == "VIEW_3D" and context.region_data:
-            try:  # GUI only
-                bpy.ops.view3d.view_axis(type="TOP")
-                bpy.ops.view3d.view_selected()
-            except RuntimeError:
-                pass
+        if self.frame_view:
+            frame_canvas(context, doc)
         return {"FINISHED"}
 
 
