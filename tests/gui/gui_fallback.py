@@ -14,10 +14,13 @@ def scenario(h):
     from seam_studio.ui import workspaces as W
     tpl = next(p for p in bpy.utils.app_template_paths() if os.path.exists(os.path.join(p, "seam", "__init__.py")))
     h.check(not os.path.exists(os.path.join(tpl, "seam", "startup.blend")), "scenario runs against a template without startup.blend")
-    ok = yield from h.wait_until(lambda: all(n in bpy.data.workspaces for n in W.SEAM_WORKSPACES) and
-                                 h.window.workspace.name == "Vector", 120, "automatic workspace repair")
+    started = yield from h.wait_until(lambda: W.repair_running["count"] >= 1, 30, "the automatic repair to start")
+    h.check(started, "a workspace repair starts automatically at launch")
+    ok = yield from h.wait_until(lambda: not W.repair_running["active"] and
+                                 all(n in bpy.data.workspaces for n in W.SEAM_WORKSPACES) and
+                                 h.window.workspace.name == "Vector", 180, "automatic workspace repair")
     h.check(ok, "workspaces were recreated automatically at launch")
-    yield from h.wait(3.0)
+    yield from h.wait(2.0)
     scene = bpy.context.scene
     h.check(sorted(o.name for o in bpy.data.objects) == ["Artboard 1", "SEAM Canvas"],
             f"factory cube/camera/light removed, canvas created ({sorted(o.name for o in bpy.data.objects)})")

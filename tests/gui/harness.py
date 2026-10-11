@@ -294,4 +294,4 @@ def main(scenario, name=None, timeout=240.0):
             return float(n)
         return 0.05
 
-    bpy.app.timers.register(tick, first_interval=0.5)
+    bpy.app.timers.register(tick, first_interval=0.5, persistent=True)  # survives File > New in scenarios

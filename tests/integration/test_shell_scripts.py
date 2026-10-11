@@ -216,3 +216,22 @@ def test_demo_is_built_through_the_operators_that_exist(demos_mod, tmp_path, mon
     assert (ab.seam.artboard.width, ab.seam.artboard.height) == (800, 800)
     star = bpy.data.objects["Star"]
     assert star.seam.role == "SHAPE" and abs(star.seam.style.fill_color[0] - 0.871) < 0.01   # #f0882b in linear
+
+
+@needs_blender
+def test_template_without_startup_blend_still_gives_a_clean_canvas(tmp_path):
+    """Stale/missing startup.blend: factory scene is cleaned (untouched cube/camera/light) and the canvas created."""
+    profile = tmp_path / "profile"
+    tpl = profile / "scripts" / "startup" / "bl_app_templates_user" / "seam"
+    tpl.mkdir(parents=True)
+    for name in ("__init__.py", "splash.png"):
+        shutil.copy(os.path.join(ROOT, "application_templates", "seam", name), tpl / name)
+    (profile / "scripts" / "addons").mkdir(parents=True)
+    os.symlink(os.path.join(ROOT, "extensions", "seam_studio"), profile / "scripts" / "addons" / "seam_studio")
+    (profile / "config").mkdir()
+    expr = ("import bpy; print('OBJS '+','.join(sorted(o.name for o in bpy.data.objects))+' READY '+str(bpy.context.scene.seam.doc.canvas_ready))")
+    p = run([BLENDER, "--app-template", "seam", "--background", "--python-expr", expr],
+            env={"BLENDER_USER_SCRIPTS": str(profile / "scripts"), "BLENDER_USER_CONFIG": str(profile / "config")})
+    assert p.returncode == 0, p.stdout + p.stderr
+    line = [l for l in p.stdout.splitlines() if l.startswith("OBJS ")][0]
+    assert line == "OBJS Artboard 1,SEAM Canvas READY True"

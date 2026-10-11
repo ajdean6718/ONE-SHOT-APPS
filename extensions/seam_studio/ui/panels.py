@@ -103,7 +103,7 @@ class SEAM_PT_document(_SeamPanel, bpy.types.Panel):
             if doc.units != "PX":
                 unit = doc.units.lower()
                 text += f" ({_fmt(px_to_unit(w, doc.units, doc.dpi))} x {_fmt(px_to_unit(h, doc.units, doc.dpi))} {unit})"
-            layout.label(text=text, icon="MESH_PLANE")
+            layout.label(text=text, icon="FILE_BLANK")
         else:
             layout.label(text="No canvas yet", icon="INFO")
 

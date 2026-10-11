@@ -541,6 +541,10 @@ def sidebar_category(region) -> Optional[str]:
 
 # ------------------------------------------------------------------ operators
 
+#: True while a workspace repair (modal or timer driven) is switching workspaces; tests wait for it to clear.
+repair_running = {"active": False, "count": 0}
+
+
 class SEAM_OT_workspace_repair(bpy.types.Operator):
     bl_idname = "seam.workspace_repair"
     bl_label = "Repair SEAM Workspaces"
@@ -563,6 +567,8 @@ class SEAM_OT_workspace_repair(bpy.types.Operator):
     def invoke(self, context, event):
         self._log = {}
         self._gen = repair_steps(context.window, context.scene, self._log)
+        repair_running["active"] = True
+        repair_running["count"] += 1
         wm = context.window_manager
         self._timer = wm.event_timer_add(0.05, window=context.window)
         wm.modal_handler_add(self)
@@ -574,15 +580,19 @@ class SEAM_OT_workspace_repair(bpy.types.Operator):
         window, scene = context.window, context.scene
 
         def done():
+            repair_running["active"] = False
             if log.get("error"):
                 print("SEAM workspace repair failed:", log["error"])
             frame_canvas_views()
 
+        repair_running["active"] = True
+        repair_running["count"] += 1
         run_steps(repair_steps(window, scene, log), on_done=done)
         self.report({"INFO"}, "Repairing SEAM workspaces...")
         return {"FINISHED"}
 
     def _finish(self, context):
+        repair_running["active"] = False
         context.window_manager.event_timer_remove(self._timer)
         self._timer = None
         if self._log.get("error"):
@@ -605,6 +615,7 @@ class SEAM_OT_workspace_repair(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
     def cancel(self, context):
+        repair_running["active"] = False
         if self._timer is not None:
             context.window_manager.event_timer_remove(self._timer)
             self._timer = None

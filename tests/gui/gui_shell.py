@@ -86,8 +86,9 @@ def scenario(h):
     with bpy.context.temp_override(window=h.window, screen=h.window.screen, area=vec_area, region=h.region(vec_area)):
         res = bpy.ops.seam.workspace_repair("INVOKE_DEFAULT")
     h.check("RUNNING_MODAL" in res, f"repair runs as a modal operator ({res})")
-    yield from h.wait_until(lambda: all(n in bpy.data.workspaces for n in W.SEAM_WORKSPACES) and
-                            h.window.workspace.name == "Vector", 90, "repair to finish")
+    yield from h.wait_until(lambda: not W.repair_running["active"] and
+                            all(n in bpy.data.workspaces for n in W.SEAM_WORKSPACES) and
+                            h.window.workspace.name == "Vector", 120, "repair to finish")
     yield from h.wait(3.0)
     h.check(all(n in bpy.data.workspaces for n in W.SEAM_WORKSPACES), "repair recreated Paint, Model and Split")
     order = []
