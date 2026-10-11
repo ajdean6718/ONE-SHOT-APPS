@@ -143,6 +143,17 @@ def test_hide_without_artwork_collection_is_a_noop(seam, win):
     assert W.hide_artwork_locally(None, area, bpy.context.scene) is False
 
 
+def test_hide_without_probe_object_does_not_toggle_blindly(seam, win):
+    scene = bpy.context.scene
+    col = bpy.data.collections.new(W.ARTWORK_COLLECTION)
+    scene.collection.children.link(col)
+    ob = bpy.data.objects.new("loose", None)
+    col.objects.link(ob)                      # artwork collection exists but there is no canvas root to probe
+    _screen, area = _layout_area(win)
+    assert W.hide_artwork_locally(win, area, scene) is False
+    assert "loose" in W._visible_names(win, area)
+
+
 def test_configure_screen_roles(seam, win):
     from seam_studio.vector import canvas
     scene = bpy.context.scene

@@ -291,8 +291,11 @@ def hide_artwork_locally(window, area, scene=None) -> bool:
         return False
     space = area.spaces.active
     space.use_local_collections = True
-    if artwork_hidden(window, area, scene) is True:
+    state = artwork_hidden(window, area, scene)
+    if state is True:
         return True
+    if state is None:
+        return False  # no probe object (no canvas root yet): the state cannot be verified, so do not toggle blindly
     with bpy.context.temp_override(window=window, screen=window.screen, area=area, region=window_region(area),
                                   scene=scene):
         bpy.ops.object.hide_collection(collection_index=idx, toggle=True)
@@ -426,10 +429,11 @@ def _prepare_screen(window, name: str) -> None:
         _split_area(window, view3d_areas(window.screen)[0], 0.5)
 
 
-def repair_steps(window, scene, log: dict):
+def repair_steps(window, scene, log: dict, final: Optional[str] = None):
     """Generator that creates missing SEAM workspaces, orders them first and configures their views.
 
     ``log`` receives ``created`` (names), ``configured`` ({view: description}) and ``error`` (message or None).
+    The window ends on workspace ``final`` (default: the one it showed before).
     """
     from ..vector import canvas
     log.update(created=[], configured={}, error=None)
@@ -460,9 +464,11 @@ def repair_steps(window, scene, log: dict):
         import traceback
         traceback.print_exc()
         log["error"] = f"{type(exc).__name__}: {exc}"
-    if original is not None and original.name in bpy.data.workspaces:
+    target = bpy.data.workspaces.get(final) if final else None
+    target = target or original
+    if target is not None and target.name in bpy.data.workspaces:
         try:
-            yield from _switch(window, original)
+            yield from _switch(window, target)
         except WorkspaceError:
             pass
 
@@ -553,6 +559,10 @@ class SEAM_OT_workspace_repair(bpy.types.Operator):
                       "The window flips through the workspaces while it works")
     bl_options = {"REGISTER"}
 
+    activate: bpy.props.StringProperty(
+        name="Activate", default="", options={"SKIP_SAVE"},
+        description="Workspace to show when the repair is done (default: the one shown now)")
+
     _timer = None
     _gen = None
     _log = None
@@ -566,7 +576,7 @@ class SEAM_OT_workspace_repair(bpy.types.Operator):
 
     def invoke(self, context, event):
         self._log = {}
-        self._gen = repair_steps(context.window, context.scene, self._log)
+        self._gen = repair_steps(context.window, context.scene, self._log, final=self.activate or None)
         repair_running["active"] = True
         repair_running["count"] += 1
         wm = context.window_manager
@@ -587,7 +597,7 @@ class SEAM_OT_workspace_repair(bpy.types.Operator):
 
         repair_running["active"] = True
         repair_running["count"] += 1
-        run_steps(repair_steps(window, scene, log), on_done=done)
+        run_steps(repair_steps(window, scene, log, final=self.activate or None), on_done=done)
         self.report({"INFO"}, "Repairing SEAM workspaces...")
         return {"FINISHED"}
 

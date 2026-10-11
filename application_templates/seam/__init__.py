@@ -68,7 +68,7 @@ def _timer_new_document(module_name: str):
     if missing and len(wm.windows):
         try:
             with bpy.context.temp_override(window=wm.windows[0], screen=wm.windows[0].screen):
-                bpy.ops.seam.workspace_repair("INVOKE_DEFAULT")
+                bpy.ops.seam.workspace_repair("INVOKE_DEFAULT", activate="Vector")
         except Exception as exc:
             print("SEAM template: workspace repair failed:", exc)
     else:

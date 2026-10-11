@@ -99,11 +99,11 @@ class SEAM_PT_document(_SeamPanel, bpy.types.Panel):
         ab = _active_artboard(scene)
         if ab is not None:
             w, h = ab.seam.artboard.width, ab.seam.artboard.height
-            text = f"Artboard {_fmt(w)} x {_fmt(h)} px"
+            layout.label(text=f"Artboard {_fmt(w)} x {_fmt(h)} px", icon="FILE_BLANK")
             if doc.units != "PX":
                 unit = doc.units.lower()
-                text += f" ({_fmt(px_to_unit(w, doc.units, doc.dpi))} x {_fmt(px_to_unit(h, doc.units, doc.dpi))} {unit})"
-            layout.label(text=text, icon="FILE_BLANK")
+                layout.label(text=f"= {_fmt(px_to_unit(w, doc.units, doc.dpi))} x "
+                                  f"{_fmt(px_to_unit(h, doc.units, doc.dpi))} {unit}")
         else:
             layout.label(text="No canvas yet", icon="INFO")
 
