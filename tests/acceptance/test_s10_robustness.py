@@ -229,6 +229,15 @@ def test_duplicating_a_result_makes_an_independent_object(seam, engine):
     assert dup.seam.role == "NONE" and dup.seam.owner_id == "" and dup.data != obj(tname).data
     assert len(bpy.context.scene.seam.links) == 1 and link_of(lid).target == obj(tname)
     frozen = mesh_np(dup).copy()
+    # the copy has its own materials: recolouring the source recolours the live result only
+    live_mats = {m.name for m in obj(tname).data.materials}
+    assert len(dup.data.materials) >= 1 and not ({m.name for m in dup.data.materials} & live_mats)
+    assert all(not m.get("seam_link_id") for m in dup.data.materials)
+    dup_colours = [tuple(m.diffuse_color) for m in dup.data.materials]
+    obj(sname).seam.style.fill_color = (0.1, 0.9, 0.1, 1.0)
+    flush()
+    assert tuple(obj(tname).data.materials[0].diffuse_color) == pytest.approx((0.1, 0.9, 0.1, 1.0), abs=1e-6)
+    assert [tuple(m.diffuse_color) for m in dup.data.materials] == dup_colours
     move_nodes(obj(sname), [1, 2], dx=100.0)
     assert extent(link_of(lid).target)[0] == pytest.approx(3.0, abs=1e-5)
     assert np.array_equal(mesh_np(dup), frozen) and extent(dup)[0] == pytest.approx(2.0, abs=1e-5)
@@ -238,6 +247,7 @@ def test_duplicating_a_result_makes_an_independent_object(seam, engine):
     flush()
     alt = bpy.context.active_object
     assert alt.seam.role == "NONE" and alt.data != obj(tname).data
+    assert not ({m.name for m in alt.data.materials} & {m.name for m in obj(tname).data.materials})
     move_nodes(obj(sname), [0, 3], dx=-100.0)
     assert extent(link_of(lid).target)[0] == pytest.approx(4.0, abs=1e-5) and extent(alt)[0] == pytest.approx(3.0, abs=1e-5)
     assert_link_consistent(link_of(lid))
